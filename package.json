@@ -1,6 +1,7 @@
 {
-  "name": "omp-model-routing",
+  "name": "omp-anvil",
   "private": true,
+  "license": "MIT",
   "engines": {
     "bun": ">=1.4.4"
   },

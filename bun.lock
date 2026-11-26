@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "omp-model-routing",
+      "name": "omp-anvil",
       "dependencies": {
         "@oh-my-pi/pi-coding-agent": "19.0.1",
       },

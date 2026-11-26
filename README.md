@@ -1,38 +1,30 @@
-# OMP 模型路由与子 agent 委派
+# OMP Anvil
 
-一份从 OMP/LCP 19.0.1 配置整理出的脱敏快照。预设只声明一个 `@role`；模型、推理档位和有序回退链集中在同一个配置文件，不在提示词里重复维护。
+**基于 [Oh My Pi](https://github.com/can1357/oh-my-pi) 的深度定制编码 Agent 发行版。**
 
-| 文件 | 用途 |
-| --- | --- |
-| [`native-routing.config.json`](native-routing.config.json) | 模型选择列表、角色与别名、推理档位、角色回退及具体模型回退 |
-| [`lcp.json`](lcp.json) | 最小 LCP 启动配置，加载路由 overlay；不启用 Workbench、Risk Guard 或 Codex 账号偏好扩展 |
-| [`agents/`](agents/) | 12 个子 agent 预设，覆盖只读查证、实现、审查和视觉工作 |
-| [`skills/subagent-coordination/`](skills/subagent-coordination/) | 顶层会话使用的委派指南：何时内联或委派、怎么选预设、如何交接与验收 |
-| [`skills/`](skills/) | 另含 `frontend-engineer` 预设对应的两份前端技能 |
-| [`examples/`](examples/) | 自定义 provider 和 Codex 多账号策略的独立示例，默认不加载 |
-| [`packages/host/`](packages/host/) | LCP 19.0.1 的 14 项宿主补丁、原始 diff、应用顺序和构建工具 |
-| [`patches/`](patches/) | 按宿主系列生成的 4 份 Bun 补丁，安装时自动应用 |
+Anvil 以官方发布的 OMP **19.0.1** 为基线，将宿主修改维护成可审查、可重建的有序补丁，并交付能独立运行的宿主、子 agent 预设与协作技能。项目升级时审查的是补丁与上游版本之间的差异，不需要维护一份完整的上游源码副本。
 
-## 接入
+## Anvil 改了什么
 
-1. 先在独立配置目录中试用，不覆盖正在使用的 `~/.omp/agent`。已有 LCP 安装时，把 `lcp.json` 和 `native-routing.config.json` 放到该目录，设置 `PI_CODING_AGENT_DIR` 指向它。没有 LCP 安装时，用下面的源码入口；它不依赖已有的 `lcp` 二进制。
-2. 把 `example-provider-N/model-name` 视为匿名路由标记，不是可请求的模型。按自己的模型目录替换它们（包括 `enabledModels`、角色、回退键和回退成员），或删除不需要的候选。保留原生 Codex 和智谱模型选择器作为配置参考；能否调用取决于本机目录和账号权限。搜索、图像、语音和决策模型需要各自匹配的能力，不使用任意聊天模型替代。
-3. 预设可放到该目录的 `agents/`；只复制宿主尚未内置、同名未注册的技能到 `skills/`。能否使用预设中列出的工具或 MCP，仍由宿主和当前会话授权决定；复制预设不会授予权限。
-4. 已有 LCP 时，用 `lcp-ctl config check` 和 `lcp-ctl roles --json` 核对启动配置和角色计划。这两项是离线检查，不会验证模型可用性或推理权限。确认候选均已配置，再启动会话尝试 `@default` 和一个子 agent。
+- **宿主补丁**：14 项特性覆盖启动、扩展接口、模型路由、原生界面、记忆路由和子 agent 生命周期。维护源与 Bun 安装产物分开。
+- **角色模型与回退**：用 `@role` 表达任务需求；模型、推理档位和回退顺序由配置决定。角色计划随会话保留，标题、空闲回顾和记忆处理可使用独立模型。
+- **受管子 agent**：12 个专用预设覆盖侦察、实现、审查、视觉和前端工程；预设绑定角色，不把模型 ID 写进提示词。
+- **委派与协作**：`subagent-coordination` 指南说明什么时候该委派、如何分工、回收和验收。前端预设附带工程及工具边界技能，不会自动获得外部服务权限。
 
-需要自定义 provider 时，参考 [`models.yml`](examples/models.yml) 把相应条目合并入自己的模型目录；API key 只通过本机环境注入。需要 Codex 多账号策略时，再按 [`codex-session.config.json`](examples/codex-session.config.json) 填写自己的账号选择器，并加入 `lcp.json` 的 `overlays`。示例端点和账号均不可用，不要将填写后的文件提交。
+Anvil 当前采用源码分发，不依赖本机已有的 LCP 二进制。这个仓库交付 OMP 宿主和可复用的定制，不包含 Workbench 或 Risk Guard 扩展应用，也不包含个人部署和运行数据。
 
-## 从补丁源码运行宿主
+## 快速上手
 
-使用 Bun 1.4.4 或更高版本。在本仓目录执行：
+需要 **Bun 1.4.4 或更高版本**和 Git。在仓库根目录运行：
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
-bun run host:check
 bun run omp:patched --version
 ```
 
-上游包的 `dist/cli.js` 是预打包入口，不会读取这里修改的源码；`omp:patched` 直接运行打补丁后的 `src/cli.ts`。先把路由模板和委派 skill 复制到隔离目录：
+`omp:patched` 从打过补丁的源码启动。上游包的预打包入口 `dist/cli.js` 不会读取这些源码修改。
+
+首次试用时，将路由模板和委派 skill 复制到隔离目录，不覆盖自己的 OMP 配置：
 
 ```sh
 export PI_CODING_AGENT_DIR="$PWD/.local/agent"
@@ -41,18 +33,26 @@ cp -R skills/subagent-coordination "$PI_CODING_AGENT_DIR/skills/"
 cp native-routing.config.json "$PI_CODING_AGENT_DIR/"
 ```
 
-填好隔离目录中的模型目录与路由副本后，从同一终端启动：
+在隔离目录里完成认证并编辑 `native-routing.config.json` 副本。`example-provider-N/model-name` 是示例选择器，请在模型列表、角色和回退链中替换为已配置的模型，或移除不用的候选。搜索、图像、语音和决策模型需要相应的供应商能力。自定义 provider 可参考 [`examples/models.yml`](examples/models.yml)，将密钥通过本机环境注入，不写进模板。
 
 ```sh
 bun run omp:patched --config "$PI_CODING_AGENT_DIR/native-routing.config.json" --model @default
 ```
 
-在这个独立目录中完成模型认证；不要从主目录复制真实凭证。子 agent 预设和两份前端 skill 已由补丁内置，不必重复安装。此入口只运行 OMP 宿主，不读取 `lcp.json`，也不加载 LCP 的 Workbench 或 Risk Guard 扩展。
+受管预设和两份前端 skill 已内置。已有 LCP 启动器的用户也可以使用 [`lcp.json`](lcp.json) 加载同一模板；该文件和 [Codex 账号策略示例](examples/codex-session.config.json) 都不是独立源码入口的前置条件。
 
-### 维护补丁
+## 仓库结构
 
-[`series.json`](packages/host/series.json) 列出完整应用顺序。其中 `startup`、`role-plans`、`scenario-roles`、`managed-presets`、`subagent-context` 和 `frontend-engineer` 对应配置覆盖、角色回退、后台模型及子 agent 行为。其余宿主补丁保留在原顺序中，避免裁去后续 diff 所依赖的修改；本仓不包含这些补丁可能对接的 LCP 扩展应用。
+| 路径 | 用途 |
+| --- | --- |
+| [`packages/host/series.json`](packages/host/series.json) | 上游版本固定点与补丁应用顺序 |
+| [`packages/host/features/`](packages/host/features/) | 按宿主特性维护的原始 diff |
+| [`patches/`](patches/) | 由补丁系列生成的四份 Bun 安装补丁 |
+| [`agents/`](agents/) · [`skills/`](skills/) | 角色预设、委派指南与配套技能 |
+| [`native-routing.config.json`](native-routing.config.json) · [`examples/`](examples/) | 可复用配置模板，不含实际账号或私有端点 |
 
-维护源在 `packages/host/features/<feature>/patches/`。按序更新源后用 `bun run host:build` 生成聚合补丁，再用 `bun run host:check` 核对。生成文件不要手改。检查和生成默认从 Bun 安装缓存取固定版本的未打补丁包，也可用 `--pristine-root <dir>` 指定原始包目录。
+## 贡献与许可证
 
-快照没有包含真实账号、凭证、私有端点、原始 provider 目录、本机路径、项目记忆、会话缓存或原仓 Git 历史。
+修补宿主时改维护源，使用 `bun run host:build` 重新生成安装补丁，再运行 `bun run host:check`。不要直接编辑 `patches/`。补丁升级、变更同步和隔离验证见[贡献与维护指南](CONTRIBUTING.md)。
+
+项目使用 [MIT 许可证](LICENSE)；上游许可证及版权声明保留在 [`packages/host/LICENSE.upstream`](packages/host/LICENSE.upstream)。
