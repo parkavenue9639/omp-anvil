@@ -1,0 +1,14 @@
+# Replace the endpoint and model ID in your local models.yml, not here.
+providers:
+  example-provider-1:
+    baseUrl: https://api.example.invalid/v1
+    api: openai-completions
+    apiKey: EXAMPLE_PROVIDER_API_KEY
+    models:
+      - id: fast-chat
+        name: Example chat model
+        input: [text]
+        reasoning: false
+        contextWindow: 32768
+        maxTokens: 4096
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

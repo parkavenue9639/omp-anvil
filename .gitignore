@@ -1,0 +1,8 @@
+/.local/
+/.env
+/.env.*
+/models.yml
+/codex-session.config.json
+/auth.json
+/models.db*
+/sessions/

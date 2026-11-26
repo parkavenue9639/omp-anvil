@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "profile": "default",
+  "overlays": ["native-routing.config.json"],
+  "modules": {
+    "riskGuard": false,
+    "workbench": false,
+    "codexPreference": false
+  },
+  "extensions": []
+}

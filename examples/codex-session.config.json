@@ -1,0 +1,18 @@
+{
+  "auth": {
+    "accountPolicies": [
+      {
+        "provider": "openai-codex",
+        "account": { "email": "primary@example.invalid", "orgId": "org-example-primary" },
+        "priority": 10,
+        "reservePct": 10
+      },
+      {
+        "provider": "openai-codex",
+        "account": { "email": "fallback@example.invalid", "orgId": "org-example-fallback" },
+        "priority": 0,
+        "reservePct": 5
+      }
+    ]
+  }
+}

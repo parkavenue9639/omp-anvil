@@ -1,0 +1,170 @@
+{
+  "enabledModels": [
+    "openai-codex/gpt-6.2-astra",
+    "openai-codex/gpt-6.2-sol",
+    "openai-codex/gpt-6.1-terra",
+    "openai-codex/gpt-6.1-sol",
+    "openai-codex/gpt-6-astra",
+    "openai-codex/gpt-6-sol",
+    "openai-codex/gpt-6-luna",
+    "openai-codex/gpt-5.6-sol",
+    "openai-codex/gpt-5.6-terra",
+    "openai-codex/gpt-5.6-luna",
+    "example-provider-1/fast-chat",
+    "example-provider-1/analysis-chat",
+    "example-provider-7/model-6",
+    "zhipu-coding-plan/glm-5.3",
+    "zhipu-coding-plan/glm-5.3-flash",
+    "example-provider-2/work-chat",
+    "example-provider-3/model-7",
+    "example-provider-3/background-chat",
+    "example-provider-3/model-1",
+    "example-provider-3/model-8",
+    "example-provider-3/model-9",
+    "example-provider-3/frontend-chat"
+  ],
+  "defaultThinkingLevel": "auto",
+  "title": {
+    "generator": "tiny"
+  },
+  "web_search": {
+    "enabled": true
+  },
+  "generate_image": {
+    "enabled": true
+  },
+  "speechgen": {
+    "enabled": true
+  },
+  "modelRoles": {
+    "default": "openai-codex/gpt-6.2-sol:high",
+    "fast": "example-provider-1/fast-chat:high",
+    "work": "example-provider-2/work-chat:high",
+    "engineer": "openai-codex/gpt-6.2-sol:high",
+    "routine": "zhipu-coding-plan/glm-5.3:high",
+    "deep": "example-provider-1/analysis-chat:high",
+    "review": "example-provider-1/analysis-chat:high",
+    "lookup": "example-provider-1/fast-chat:high",
+    "visual": "openai-codex/gpt-6.1-terra:high",
+    "security": "openai-codex/gpt-6.2-astra:xhigh",
+    "creative": "example-provider-1/analysis-chat:high",
+    "frontend": "example-provider-3/frontend-chat:high",
+    "free": "example-provider-3/background-chat",
+    "title": "@free",
+    "widget": "@free",
+    "recap": "@free",
+    "task": "@work",
+    "smol": "example-provider-1/fast-chat:high",
+    "slow": "@deep",
+    "plan": "@deep",
+    "advisor": "@deep",
+    "vision": "@visual",
+    "commit": "@smol",
+    "tiny": "@smol",
+    "memory": "zhipu-coding-plan/glm-5.3:high",
+    "judge": "example-provider-4/decision-model",
+    "web": "example-provider-2/search-model",
+    "image": "example-provider-4/image-model",
+    "speech": "example-provider-4/speech-model"
+  },
+  "task": {
+    "eager": "preferred",
+    "enableEffort": true,
+    "showResolvedModelBadge": true
+  },
+  "retry": {
+    "enabled": true,
+    "modelFallback": true,
+    "fallbackOn": "any",
+    "usageAwareFallback": false,
+    "fallbackRevertPolicy": "never",
+    "fallbackChains": {
+      "default": [
+        "openai-codex/gpt-6.1-sol:high",
+        "example-provider-1/analysis-chat:high",
+        "zhipu-coding-plan/glm-5.3:high"
+      ],
+      "fast": [
+        "example-provider-2/work-chat:high",
+        "zhipu-coding-plan/glm-5.3-flash:high",
+        "openai-codex/gpt-6.1-sol:high"
+      ],
+      "work": [
+        "example-provider-1/fast-chat:high",
+        "zhipu-coding-plan/glm-5.3:high",
+        "openai-codex/gpt-6.1-sol:high"
+      ],
+      "engineer": [
+        "example-provider-1/analysis-chat:high",
+        "example-provider-3/model-1:high",
+        "openai-codex/gpt-6.1-sol:high"
+      ],
+      "routine": [
+        "example-provider-1/fast-chat:high",
+        "example-provider-2/work-chat:high",
+        "openai-codex/gpt-6.1-sol:high"
+      ],
+      "deep": [
+        "example-provider-3/model-1:high",
+        "openai-codex/gpt-6.2-astra:xhigh",
+        "openai-codex/gpt-6.2-sol:high"
+      ],
+      "review": [
+        "example-provider-3/model-1:high",
+        "openai-codex/gpt-6.2-astra:high",
+        "openai-codex/gpt-6.2-sol:high"
+      ],
+      "lookup": [
+        "example-provider-2/work-chat:high",
+        "zhipu-coding-plan/glm-5.3:high"
+      ],
+      "visual": [
+        "example-provider-3/model-1:high",
+        "example-provider-2/work-chat:high",
+        "openai-codex/gpt-6.2-sol:high"
+      ],
+      "security": [
+        "example-provider-1/analysis-chat:high",
+        "example-provider-3/model-1:high"
+      ],
+      "creative": [
+        "example-provider-3/model-1:high",
+        "openai-codex/gpt-6.2-astra:xhigh"
+      ],
+      "frontend": [
+        "example-provider-1/analysis-chat:high",
+        "example-provider-3/model-1:high",
+        "openai-codex/gpt-6.2-sol:high"
+      ],
+      "smol": [
+        "zhipu-coding-plan/glm-5.3-flash:high",
+        "zhipu-coding-plan/glm-5.3:high"
+      ],
+      "memory": [
+        "zhipu-coding-plan/glm-5.3-flash:high",
+        "example-provider-2/work-chat:high",
+        "openai-codex/gpt-6.1-sol:high"
+      ],
+      "free": [],
+      "judge": [
+        "example-provider-5/model-2"
+      ],
+      "web": [
+        "example-provider-4/model-3",
+        "example-provider-6/model-4",
+        "example-provider-6/model-5"
+      ],
+      "openai-codex/gpt-6.2-astra": [],
+      "openai-codex/gpt-6.2-sol": [],
+      "openai-codex/gpt-6.1-terra": [],
+      "openai-codex/gpt-6.1-sol": [],
+      "openai-codex/gpt-6-astra": [],
+      "openai-codex/gpt-5.6-sol": [],
+      "example-provider-1/fast-chat": [],
+      "example-provider-1/analysis-chat": [],
+      "zhipu-coding-plan/glm-5.3": [],
+      "zhipu-coding-plan/glm-5.3-flash": [],
+      "example-provider-2/work-chat": []
+    }
+  }
+}
