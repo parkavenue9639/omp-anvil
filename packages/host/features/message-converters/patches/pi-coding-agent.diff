@@ -1,0 +1,184 @@
+diff --git a/dist/types/extensibility/extensions/types.d.ts b/dist/types/extensibility/extensions/types.d.ts
+index 96bcc5f4b306469b5b0622b9cc7b556d3b42fc7c..306586c849b2787c4ebf99931ecc69a7183647c2 100644
+--- a/dist/types/extensibility/extensions/types.d.ts
++++ b/dist/types/extensibility/extensions/types.d.ts
+@@ -43,7 +43,7 @@ import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session.js";
+ import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types.js";
+ import type { CompactMode } from "../../session/compact-modes.js";
+-import type { CustomMessagePayload } from "../../session/messages.js";
++import type { CustomMessageConverter, CustomMessagePayload } from "../../session/messages.js";
+ import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager.js";
+ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools/index.js";
+ import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
+@@ -1661,6 +1661,13 @@ export interface ExtensionAPI {
+     getFlag(name: string): boolean | string | undefined;
+     /** Register a custom renderer for CustomMessageEntry. */
+     registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
++    /**
++     * Decide how messages of `customType` reach the model (process-wide; the same
++     * type registered again replaces the converter). Return `undefined` from the
++     * converter to keep the native conversion for a message. Stored history keeps
++     * its native custom type; conversion runs when model context is built.
++     */
++    registerMessageConverter(customType: string, converter: CustomMessageConverter): void;
+     /** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
+     registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+     /**
+diff --git a/dist/types/session/messages.d.ts b/dist/types/session/messages.d.ts
+index 54c41375fa0acebff71f9d99aab00eff9db197e0..431c589a6161980031c5c9fb4bb402f699f92f5a 100644
+--- a/dist/types/session/messages.d.ts
++++ b/dist/types/session/messages.d.ts
+@@ -191,6 +191,14 @@ export declare function pythonExecutionToText(msg: PythonExecutionMessage): stri
+ export declare function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: AssistantMessage): AssistantMessage;
+ /** Drop the outer-array shortcut when an owner replaces a live history in place. */
+ export declare function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void;
++/** A custom or hook message as stored in history, before model conversion. */
++export type ConvertibleCustomMessage = Extract<AgentMessage, {
++    role: "custom" | "hookMessage";
++}>;
++/** Converts one custom message type to model messages; `undefined` keeps the native conversion. */
++export type CustomMessageConverter = (message: ConvertibleCustomMessage) => Message[] | undefined;
++/** Register how messages of `customType` reach the model, process-wide. Returns an unregister function. */
++export declare function registerCustomMessageConverter(customType: string, converter: CustomMessageConverter): () => void;
+ /** A converted viewer message and its position in the source and converted histories. */
+ export interface ContextViewMessage {
+     message: Message;
+diff --git a/src/extensibility/extensions/loader.ts b/src/extensibility/extensions/loader.ts
+index 1e05b7fce1b8781016a031e2cde4a76986288506..93ee099ae466b32e9625d82019a4909e2c7b1890 100644
+--- a/src/extensibility/extensions/loader.ts
++++ b/src/extensibility/extensions/loader.ts
+@@ -27,7 +27,7 @@ import type { ExecOptions } from "../../exec/exec";
+ import { execCommand } from "../../exec/exec";
+ import { getCodingAgentApi } from "../host-api";
+ import type { SendUserMessageOptions } from "../../session/agent-session";
+-import type { CustomMessagePayload } from "../../session/messages";
++import { type CustomMessageConverter, type CustomMessagePayload, registerCustomMessageConverter } from "../../session/messages";
+ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
+ import { isFilesystemSourcePath } from "../../tools/path-utils";
+ import { InternalUrlRouter } from "../../internal-urls/router";
+@@ -316,6 +316,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+ 		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
+ 	}
+ 
++	registerMessageConverter(customType: string, converter: CustomMessageConverter): void {
++		registerCustomMessageConverter(customType, converter);
++	}
++
+ 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
+ 		this.extension.assistantThinkingRenderers.push(renderer);
+ 	}
+diff --git a/src/extensibility/extensions/types.ts b/src/extensibility/extensions/types.ts
+index a42cb18f1b19f70a1f9dcea1f19db3b5342cee15..381f695580a58a5c13aa056e6e5eff7fec493ab5 100644
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -100,7 +100,7 @@ import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+ import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
+ import type { CompactMode } from "../../session/compact-modes";
+-import type { CustomMessagePayload } from "../../session/messages";
++import type { CustomMessageConverter, CustomMessagePayload } from "../../session/messages";
+ import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
+ import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
+@@ -2194,6 +2194,14 @@ export interface ExtensionAPI {
+ 	/** Register a custom renderer for CustomMessageEntry. */
+ 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
+ 
++	/**
++	 * Decide how messages of `customType` reach the model (process-wide; the same
++	 * type registered again replaces the converter). Return `undefined` from the
++	 * converter to keep the native conversion for a message. Stored history keeps
++	 * its native custom type; conversion runs when model context is built.
++	 */
++	registerMessageConverter(customType: string, converter: CustomMessageConverter): void;
++
+ 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
+ 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+ 
+diff --git a/src/session/messages.ts b/src/session/messages.ts
+index 8d9c072515f8a3be0f434761dbbe04d3febecbab..6aa333129831c3b54f5fa6a84b509843384878f8 100644
+--- a/src/session/messages.ts
++++ b/src/session/messages.ts
+@@ -1114,7 +1114,7 @@ interface ConvertMemoEntry {
+ 	interruptedNext: boolean;
+ 	fragment: Message[];
+ }
+-const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
++let convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
+ 
+ // Array-level shortcuts over the per-message memo. The live agent mutates one
+ // `AgentMessage[]` identity across a turn: appending new messages and swapping
+@@ -1153,6 +1153,54 @@ registerMessageCacheInvalidator(message => {
+ 	convertGeneration++;
+ });
+ 
++/** A custom or hook message as stored in history, before model conversion. */
++export type ConvertibleCustomMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
++
++/**
++ * Converts one custom message type to model messages. Return `undefined` to
++ * fall back to the native conversion for that message.
++ */
++export type CustomMessageConverter = (message: ConvertibleCustomMessage) => Message[] | undefined;
++
++const customMessageConverters = new Map<string, CustomMessageConverter>();
++
++/** Drop every memoized conversion so a converter change applies to restored history too. */
++function resetConversionCaches(): void {
++	convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
++	convertGeneration++;
++}
++
++/**
++ * Register how messages of `customType` reach the model, process-wide (every
++ * session and subagent in this process converts through the same table).
++ * Registering the same type again replaces its converter. Conversion applies
++ * at model-context build time, so stored history keeps its native custom type.
++ * Returns a function that removes this converter if it is still the active one.
++ */
++export function registerCustomMessageConverter(customType: string, converter: CustomMessageConverter): () => void {
++	if (typeof customType !== "string" || customType.length === 0) throw new TypeError("customType must be a non-empty string");
++	if (typeof converter !== "function") throw new TypeError("converter must be a function");
++	customMessageConverters.set(customType, converter);
++	resetConversionCaches();
++	return () => {
++		if (customMessageConverters.get(customType) !== converter) return;
++		customMessageConverters.delete(customType);
++		resetConversionCaches();
++	};
++}
++
++/** Registered conversion for one message; a throwing converter falls back to native conversion. */
++function convertRegisteredCustomMessage(message: ConvertibleCustomMessage): Message[] | undefined {
++	const converter = customMessageConverters.get(message.customType);
++	if (!converter) return undefined;
++	try {
++		return converter(message);
++	} catch (error) {
++		logger.warn("Custom message converter failed; using native conversion", { customType: message.customType, error: String(error) });
++		return undefined;
++	}
++}
++
+ /** Convert one message to its LLM fragment. `interruptedNext` is true only for an
+  *  assistant turn immediately followed by its interrupted-thinking marker. */
+ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
+@@ -1222,6 +1270,8 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
+ 		}
+ 		case "custom": {
+ 			if (m.excludeFromContext || !isCustomMessageContent(m.content)) return [];
++			const registered = convertRegisteredCustomMessage(m);
++			if (registered) return registered;
+ 			if (isSteeringUserMessage(m)) {
+ 				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
+ 				return converted ? [converted] : [];
+@@ -1246,6 +1296,8 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
+ 		}
+ 		case "hookMessage": {
+ 			if (!isCustomMessageContent(m.content)) return [];
++			const registered = convertRegisteredCustomMessage(m);
++			if (registered) return registered;
+ 			const split = convertImageBearingCustomMessage(m);
+ 			if (split) return split;
+ 			const converted = convertMessageToLlm(m);

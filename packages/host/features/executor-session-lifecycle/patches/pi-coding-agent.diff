@@ -1,0 +1,3293 @@
+diff --git a/dist/types/cli/args.d.ts b/dist/types/cli/args.d.ts
+index 03d6679585f73319cd3b0dbaa7789074bd75bc9b..9c526e2dda2ba2bd499d947d6eca463736101234 100644
+--- a/dist/types/cli/args.d.ts
++++ b/dist/types/cli/args.d.ts
+@@ -41,6 +41,7 @@ export interface Args {
+     externalThinking?: boolean;
+     continue?: boolean;
+     resume?: string | true;
++    resumeExact?: string;
+     /**
+      * `--restore`: resume the session {@link resume} names, then go on with what its last
+      * process left unfinished (the turn it was in, the subagents it was running).
+diff --git a/dist/types/exec/bash-executor.d.ts b/dist/types/exec/bash-executor.d.ts
+index f020cf69e7b77b95579a3e125af06e7c92add942..0a55987b5bd227153d600699ab7700acd0493ad5 100644
+--- a/dist/types/exec/bash-executor.d.ts
++++ b/dist/types/exec/bash-executor.d.ts
+@@ -67,6 +67,8 @@ export interface BashExecutorOptions {
+      * user-shell paths.
+      */
+     onStart?: (pids: () => readonly number[]) => void;
++    /** Receives a promise that settles when the native run returns (after a cancelled result, the process may still run until then). */
++    onRun?: (exited: Promise<unknown>) => void;
+     /**
+      * Asked once the run settles: `false` means the agent session that owns
+      * `sessionKey` was left (new, fork, switch, branch) while the command ran,
+diff --git a/dist/types/extensibility/extensions/runner.d.ts b/dist/types/extensibility/extensions/runner.d.ts
+index c9aa8d59ef253326e0079103bdfdbf867138706e..6c1ac6b726387d689a419ef1690e0b41d987ba34 100644
+--- a/dist/types/extensibility/extensions/runner.d.ts
++++ b/dist/types/extensibility/extensions/runner.d.ts
+@@ -1,3 +1,4 @@
++import type { ExecutorSessionLifecycle } from "../../session/executor-session-lifecycle";
+ import { type AgentMessage, type AgentTool, type AgentToolContext, type AgentToolResult, type AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+ import type { AssistantMessage, CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+ import type { Judge } from "@oh-my-pi/pi-ai";
+@@ -340,6 +341,7 @@ export declare class ExtensionRunner {
+     setJudgeFactory(createJudge: (toolName: string) => Judge): void;
+     /** Bind the session-owned native completion without exposing accounting controls. */
+     setCompletionFactory(createCompletion: (toolName: string, assertActive: () => void) => ExtensionContext["complete"]): void;
++    setExecutorLifecycle(getLifecycle: () => ExecutorSessionLifecycle): void;
+     /** Invalidate contexts and cancel requests before a session abort or replacement. */
+     cancelCompletions(): void;
+     /** Settle cancelled completions before the owning session journal is replaced or closed. */
+diff --git a/dist/types/extensibility/extensions/types.d.ts b/dist/types/extensibility/extensions/types.d.ts
+index c2e48f4df066180acebae5aa49193dc44aa833fb..a3782b9e3134139849034053193fdd2f6eed67d4 100644
+--- a/dist/types/extensibility/extensions/types.d.ts
++++ b/dist/types/extensibility/extensions/types.d.ts
+@@ -1,3 +1,7 @@
++import type { ExecutorSessionLifecycle } from "../../session/executor-session-lifecycle";
++export type { ExecutorTarget, ExecutorInput, ExecutorInputReceipt, ExecutorTurnContext, ExecutorStopReceipt, ExecutorStopReason, ExecutorSourceEvent, SessionControlRequest, SessionControlReceipt, NativeSessionActivity } from "../../session/executor-session-lifecycle";
++export type { NativeSourceEvent, NativeSourcePage } from "../../session/executor-source-events";
++export type ExecutorSessionAPI = Pick<ExecutorSessionLifecycle, "controlSession" | "getSessionControlReceipt" | "getSessionActivity" | "bindExecutorTarget" | "admitExecutorInputs" | "reconcileExecutorInputs" | "resumeExecutorInputs" | "getExecutorInputReceipts" | "getExecutorTurnContext" | "stopExecutorAssignment" | "getExecutorWriterState" | "getExecutorCapabilities" | "getSourceEvents" | "appendSourceEvent" | "getExecutorEvents">;
+ /**
+  * Extension system types.
+  *
+@@ -576,7 +580,7 @@ export interface ExtensionLiveSession {
+      */
+     stop(): Promise<void>;
+ }
+-export interface ExtensionContext {
++export interface ExtensionContext extends ExecutorSessionAPI {
+     /** UI methods for user interaction */
+     ui: ExtensionUIContext;
+     /** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
+@@ -937,6 +941,8 @@ export type { CacheWarmingAction, CacheWarmingDecision, CacheWarmingMode, CacheW
+ export interface BeforeProviderRequestEvent {
+     type: "before_provider_request";
+     payload: unknown;
++    /** Explicitly refuse this request before transport; a return value still replaces payload. */
++    cancel(reason: string): void;
+ }
+ /** Fired after a provider response is received, before its stream body is consumed. */
+ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
+diff --git a/dist/types/extensibility/shared-events.d.ts b/dist/types/extensibility/shared-events.d.ts
+index 397c6f98db034f1db93ba39d14e1ffe1b2f4d56b..bc9107c5c61aff582841c35e88b16f612f8fd648 100644
+--- a/dist/types/extensibility/shared-events.d.ts
++++ b/dist/types/extensibility/shared-events.d.ts
+@@ -176,6 +176,7 @@ export interface AgentStartEvent {
+ export interface AgentEndEvent {
+     type: "agent_end";
+     messages: AgentMessage[];
++    stopReason?: string;
+     /**
+      * When true, this is not a terminal settle: an automatic continuation is
+      * scheduled, or background work may resume the session. See
+diff --git a/dist/types/modes/controllers/extension-ui-controller.d.ts b/dist/types/modes/controllers/extension-ui-controller.d.ts
+index 23a424e91418590620dec27839fa7a3d0c8d8a35..b2fd106c9e5d6eb52218a05567485c8fe09f5564 100644
+--- a/dist/types/modes/controllers/extension-ui-controller.d.ts
++++ b/dist/types/modes/controllers/extension-ui-controller.d.ts
+@@ -9,6 +9,7 @@ export declare class ExtensionUiController {
+     #private;
+     private ctx;
+     constructor(ctx: InteractiveModeContext);
++    hasPendingDialog(): boolean;
+     /** Remove extension-owned composer styles from the process registries. */
+     disposeComposerShapes(): void;
+     /**
+diff --git a/dist/types/modes/interactive-mode.d.ts b/dist/types/modes/interactive-mode.d.ts
+index 9f9d49d84c9f276f6c8fa580738505a4739e20b5..b9caad59e3e2269ac5277be15b31da5ee6797cc9 100644
+--- a/dist/types/modes/interactive-mode.d.ts
++++ b/dist/types/modes/interactive-mode.d.ts
+@@ -408,6 +408,7 @@ export declare class InteractiveMode implements InteractiveModeContext {
+     clearOptimisticSkillMessage(): void;
+     startPendingSubmission(input: {
+         text: string;
++        executorHumanInputId?: string;
+         images?: ImageContent[];
+         imageLinks?: (string | undefined)[];
+         customType?: string;
+diff --git a/dist/types/modes/types.d.ts b/dist/types/modes/types.d.ts
+index c5ea035863648346909539cf1433968c0c2740f0..e21a2242603d8f543a932689fe9b1de9f84d4913 100644
+--- a/dist/types/modes/types.d.ts
++++ b/dist/types/modes/types.d.ts
+@@ -56,6 +56,7 @@ export type CompactionQueuedMessage = {
+     text: string;
+     mode: "steer" | "followUp";
+     images?: ImageContent[];
++    executorHumanSubmissionId?: string;
+ };
+ /**
+  * `/compact` sent with the follow-up key during a run: it runs once the run settles, while the
+@@ -70,6 +71,7 @@ export type YieldCompaction = ConversationPosition & {
+ };
+ export type SubmittedUserInput = {
+     text: string;
++    executorHumanInputId?: string;
+     images?: ImageContent[];
+     imageLinks?: (string | undefined)[];
+     customType?: string;
+@@ -465,6 +467,7 @@ export interface InteractiveModeContext {
+     syncRetryHintRow(): void;
+     startPendingSubmission(input: {
+         text: string;
++        executorHumanInputId?: string;
+         images?: ImageContent[];
+         imageLinks?: (string | undefined)[];
+         customType?: string;
+diff --git a/dist/types/session/agent-session-types.d.ts b/dist/types/session/agent-session-types.d.ts
+index 4d03cf218ff022458e655b98f83fff7fd7b64598..2f23e3c503a0d87fae1e3424f593ddf3323c1f20 100644
+--- a/dist/types/session/agent-session-types.d.ts
++++ b/dist/types/session/agent-session-types.d.ts
+@@ -422,6 +422,7 @@ export interface AgentSessionConfig {
+ }
+ /** Options for AgentSession.prompt(). */
+ export interface PromptOptions {
++    executorHumanInputId?: string;
+     /** Whether to expand file-based prompt templates (default: true). */
+     expandPromptTemplates?: boolean;
+     /**
+diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
+index e49d7b0bd2a92b9ae21304bfc18fe1efa4ad597b..b3e7c5d1554daf4128abb4c5e6196e874b52b3be 100644
+--- a/dist/types/session/agent-session.d.ts
++++ b/dist/types/session/agent-session.d.ts
+@@ -1,3 +1,4 @@
++import type { ExecutorSessionLifecycle } from "./executor-session-lifecycle";
+ /**
+  * AgentSession - Core abstraction for agent lifecycle and session management.
+  *
+@@ -163,6 +164,20 @@ export declare class AgentSession implements SettingsScope, AgentViewSession {
+     readonly instanceKey: string;
+     readonly agent: Agent;
+     readonly sessionManager: SessionManager;
++    get executorLifecycle(): ExecutorSessionLifecycle;
++    trackProcessExit(exited: Promise<unknown>, jobId?: string): void;
++    runningProcesses(): { jobId?: string; exited: Promise<void> }[];
++    withInteractiveInput<T>(text: string, submit: () => T): T;
++    setSessionCloseHandler(handler: { blockedReason(): string | undefined; shutdown(): Promise<void> }): void;
++    setExecutorStopModeHandler(handler: { beforeAbort(): void; afterAbort(): Promise<void> | void }): void;
++    get hasBoundExecutorTarget(): boolean;
++    deferInteractiveSubmission(): string | undefined;
++    withQueuedInteractiveInput<T>(text: string, reservationId: string | undefined, submit: () => T): T;
++    get isExecutorCompletionHeld(): boolean;
++    get interactiveExecutorInputId(): string | undefined;
++    admitExecutorInputs: ExecutorSessionLifecycle["admitExecutorInputs"];
++    reconcileExecutorInputs: ExecutorSessionLifecycle["reconcileExecutorInputs"];
++    stopExecutorAssignment: ExecutorSessionLifecycle["stopExecutorAssignment"];
+     readonly settings: Settings;
+     /** Session-start policy, independent of the selected project memory backend. */
+     readonly memoryEnabled: boolean;
+@@ -976,7 +991,7 @@ export declare class AgentSession implements SettingsScope, AgentViewSession {
+      * @throws {AgentBusyError} when another turn claims the session between the interrupt and the continuation.
+      * @throws {Error} when there is no conversation to resume.
+      */
+-    resume(): Promise<void>;
++    resume(options?: { executorHumanInputId?: string }): Promise<void>;
+     /**
+      * @returns true when the message is (or will be) picked up by an agent turn
+      * — queued into a running turn, or a new turn started synchronously. false
+diff --git a/dist/types/session/bash-runner.d.ts b/dist/types/session/bash-runner.d.ts
+index 6129f334c3b0175ac657177c95c6ed7701fbbb43..6c72d2926fe31827540c799b80fb85968a64ab58 100644
+--- a/dist/types/session/bash-runner.d.ts
++++ b/dist/types/session/bash-runner.d.ts
+@@ -48,6 +48,7 @@ export interface BashRunnerHost {
+     settings: Settings;
+     extensionRunner(): ExtensionRunner | undefined;
+     isStreaming(): boolean;
++    trackProcessExit(exited: Promise<unknown>): void;
+ }
+ /** Owns bash execution and preserves result ownership across transcript transitions. */
+ export declare class BashRunner {
+diff --git a/dist/types/session/executor-session-lifecycle.d.ts b/dist/types/session/executor-session-lifecycle.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfc892315d27abdaedacd15359b0e517cd463127
+--- /dev/null
++++ b/dist/types/session/executor-session-lifecycle.d.ts
+@@ -0,0 +1,78 @@
++import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
++import type { SessionManager } from "./session-manager";
++import type { NativeSourceEvent, NativeSourcePage } from "./executor-source-events";
++export declare const EXECUTOR_CAPABILITIES: Readonly<{ feature: "executor-session-lifecycle"; version: 1; "exact-resume-v1": true; "input-v2": true; "human-sync-v1": true; "stop-v1": true; "source-events.v1": true; "router-generation-v1": true; "before-provider-cancel-v1": true; "router-handoff-wait-v1": true; "completion-human-preservation-v1": true; "silent-notice-v1": true; "session-lifecycle-control-v1": true }>;
++export type ExecutorTarget = { kind: "executor"; ticketId: string; assignmentId: string; claimEpoch: number } | { kind: "router-generation"; generation: number; roleInboxId: string; claimEpoch: number; prepared?: boolean };
++export interface ExecutorInput { id: string; ticketId?: string; kind: string; text: string; triggerId?: string; answerToReportId?: string; createdSeq: number; }
++export interface ExecutorInputReceipt { inputId: string; target: ExecutorTarget; admissionSeq: number; queuedAt: string; sessionFile?: string; historyEntryId?: string; historyAt?: string; turnId?: string; turnCompletedAt?: string; purgedAt?: string; }
++export interface ExecutorTurnContext { target?: ExecutorTarget; turnId?: string; admissionSeq: number; inputWatermark: number; consumedInputIds: string[]; unadmittedUserEntryIds: string[]; pendingHumanSubmissionIds: string[]; orphanedHumanSubmissions: { id: string; text: string; target: ExecutorTarget }[]; }
++export type ExecutorStopReason = "completed" | "human-stop" | "retry" | "scope-replaced" | "host-shutdown";
++export interface ExecutorStopReceipt { assignmentId?: string; target: ExecutorTarget; instanceId: string; gateClosedAt: string; turnAborted: boolean; purgedInputIds: string[]; jobsEnded: string[]; subagentsEnded: string[]; quiescedAt: string; reason: ExecutorStopReason; throughAdmissionSeq?: number; retainedHumanInputIds: string[]; pendingHumanSubmissionIds: string[]; }
++export interface ExecutorSourceEvent { seq: number; type: string; at: string; data: unknown; }
++export interface SessionControlRequest { action: "continue" | "close"; requestId: string; }
++export interface SessionControlReceipt { status: "queued" | "closing" | "blocked"; reason?: string; observedAt: string; historyEntryId?: string; historyAt?: string; }
++export interface NativeSessionActivity { runningJobs: number; runningProcesses: number; runningSubagents: number; pendingHumanAdmissions: number; closing: boolean; }
++export interface ExecutorLifecycleHost {
++    queue(message: AgentMessage, delivery: "followUp" | "steer"): void;
++    purge(inputIds: ReadonlySet<string>): void;
++    jobs(): { id: string; ownerId?: string; agentId?: string; cancel(): void; join: Promise<void> }[];
++    subagents?(): { id: string; parentId?: string; stop(): Promise<void> }[];
++    processes?(): { jobId?: string; ownerId?: string; exited: Promise<void> }[];
++    captureBaseline?(): void;
++    turnRunning?(): boolean;
++    activity?(): NativeSessionActivity;
++    closeSession?(): string | undefined;
++    abort(): Promise<void>;
++    cancelModelRequests(): void;
++    appendHumanHistory?(message: AgentMessage): string;
++    appendNoticeHistory?(message: AgentMessage): string;
++    noticeBoundary?(): boolean;
++    publishHistory?(message: AgentMessage): void;
++    resume?(recoveryInputIds: readonly string[]): void;
++}
++export declare function executorInputId(message: { role?: string; details?: unknown; executorInputId?: string }): string | undefined;
++export declare class ExecutorSessionLifecycle {
++    #private;
++    readonly instanceId: string;
++    constructor(manager: SessionManager, host: ExecutorLifecycleHost);
++    activateSession(): void;
++    controlSession(request: SessionControlRequest): SessionControlReceipt;
++    getSessionControlReceipt(requestId: string): SessionControlReceipt | undefined;
++    getSessionActivity(): NativeSessionActivity;
++    deferSessionControlQueue(messages: readonly AgentMessage[], reason: string): void;
++    reloadSession(): void;
++    assertTarget(target: ExecutorTarget, allowClosed?: boolean): void;
++    bindExecutorTarget(target: ExecutorTarget): { target: ExecutorTarget; instanceId: string; baselineJobIds: string[] };
++    waitForRouterActivation(signal?: AbortSignal): Promise<void>;
++    admitExecutorInputs(request: { target: ExecutorTarget; inputs: readonly ExecutorInput[]; delivery?: "followUp" | "steer"; wake?: false }): ExecutorInputReceipt[];
++    beginInteractiveSubmission(text: string): string | undefined;
++    finishInteractiveSubmission(id: string): void;
++    admitInteractiveInput(text: string, reservationId?: string): string | undefined;
++    assertInput(id: string): void;
++    assertInteractiveInput(id: string): void;
++    enrollSameTargetHistoryForInteractiveInput(inputId: string): void;
++    prepareInteractiveResume(inputId: string): void;
++    isRetainedHumanInput(id: string): boolean;
++    get hasCompletionHold(): boolean;
++    cancelPendingHumanResumes(): void;
++    ensureTurnStarted(): void;
++    enteredHistory(message: AgentMessage, entryId: string): void;
++    beginTurn(): void;
++    observeModelInputs(messages: readonly AgentMessage[]): void;
++    turnCompleted(stopReason: string, willContinue: boolean): void;
++    getExecutorTurnContext(options?: { requireFresh?: boolean }): ExecutorTurnContext;
++    reconcileExecutorInputs(request: { target: ExecutorTarget; previousTarget?: ExecutorTarget; inputIds: readonly string[]; resolveUnadmitted?: { entryIds?: readonly string[]; humanSubmissionIds?: readonly string[] } }): ExecutorInputReceipt[];
++    resumeExecutorInputs(request: { target: ExecutorTarget; inputIds: readonly string[] }): void;
++    flushSilentNotices(): void;
++    /** Only a durable silent notice in a live Router binding may authorize the idle wake-tail repair. */
++    isRouterSilentNotice(message: AgentMessage | undefined): boolean;
++    getExecutorInputReceipts(inputIds: readonly string[]): ExecutorInputReceipt[];
++    stopExecutorAssignment(request: { target: ExecutorTarget; timeoutMs?: number; reason?: ExecutorStopReason; throughAdmissionSeq?: number }): Promise<ExecutorStopReceipt>;
++    getExecutorCapabilities(): typeof EXECUTOR_CAPABILITIES;
++    getExecutorWriterState(): "owned-by-receiver" | "held" | "free" | "unknown";
++    appendSourceEvent(event: NativeSourceEvent): NativeSourceEvent;
++    getSourceEvents(request: { afterSeq: number; limit?: number; maxBytes?: number }): NativeSourcePage;
++    getExecutorEvents(request: { afterSeq: number; limit?: number; maxBytes?: number }): { sourceId: string; events: ExecutorSourceEvent[]; nextSeq: number; latestSeq: number; hasMore: boolean };
++    get hasBoundTarget(): boolean;
++    get executorBound(): boolean;
++}
+diff --git a/dist/types/session/executor-source-events.d.ts b/dist/types/session/executor-source-events.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..28ee3f26af4527a2d176c0de3881686fb5cec1d4
+--- /dev/null
++++ b/dist/types/session/executor-source-events.d.ts
+@@ -0,0 +1,19 @@
++import type { SessionManager } from "./session-manager";
++import type { SessionEntry } from "./session-entries";
++export interface NativeSourceEvent {
++    version: 1; id: string; seq: number;
++    kind: "started" | "busy" | "turn-ended" | "idle" | "exited" | "project-changed" | "title-changed";
++    at: string;
++    native: { sessionId: string; sessionFile: string; cwd: string; hostInstanceId: string };
++    loopId?: string; turnIndex?: number; nativeEntryId?: string;
++    activity?: { state: "busy" | "idle" | "stopped" | "switched"; pendingMessages: boolean | null; runningJobs: number | null; willContinue?: boolean; awaitingAsyncWork?: boolean };
++    project?: { projectIds: string[]; primaryProjectId?: string; state: "associated" | "unassigned" | "conflict" | "non-project"; origin: "automatic" | "explicit" | "inherited" | "correction"; reason?: string };
++    title?: string; exitReason?: "shutdown" | "switched";
++}
++export interface NativeSourcePage { sourceId: string; events: NativeSourceEvent[]; nextSeq: number; latestSeq: number; hasMore: boolean; }
++export declare class ExecutorSourceEvents {
++    #private;
++    constructor(manager: SessionManager, entries?: readonly SessionEntry[]);
++    appendSourceEvent(event: NativeSourceEvent): NativeSourceEvent;
++    getSourceEvents(request: { afterSeq: number; limit?: number; maxBytes?: number }): NativeSourcePage;
++}
+diff --git a/dist/types/session/session-maintenance.d.ts b/dist/types/session/session-maintenance.d.ts
+index 69c0dcc5126c8be7c40b13373252055a2299e4fd..38b0ba7a4e7dc9df442a9a2fbc642c29bfd00af3 100644
+--- a/dist/types/session/session-maintenance.d.ts
++++ b/dist/types/session/session-maintenance.d.ts
+@@ -106,6 +106,8 @@ export interface SessionMaintenanceHost {
+     disconnectFromAgent(): void;
+     reconnectToAgent(): void;
+     drainStrandedQueuedMessages(): void;
++    /** Recheck the host's existing notice boundary after maintenance clears its busy state. */
++    flushSilentNotices(): void;
+     /** The stored context as `model` reads it (the active model when omitted). */
+     buildDisplaySessionContext(model?: Model): SessionContext;
+     /** Adopt a {@link buildDisplaySessionContext} result as the live history, persisting any snapshot it appended. */
+diff --git a/dist/types/session/session-manager.d.ts b/dist/types/session/session-manager.d.ts
+index a6ab53c35658952e850b06a92cd7aff1f98f3632..18f2fff734cc47a4b51757abcd8a2edf80efd4ab 100644
+--- a/dist/types/session/session-manager.d.ts
++++ b/dist/types/session/session-manager.d.ts
+@@ -161,6 +161,9 @@ export declare class ForkSourceNotFoundError extends Error {
+  */
+ export declare class SessionManager {
+     #private;
++    static openExact(filePath: string, options?: { expectedSessionId?: string; signal?: AbortSignal; wait?: boolean; onWaiting?: () => void }): Promise<SessionManager>;
++    appendExecutorRecord(customType: string, data: unknown): string;
++    getExecutorWriterState(): "owned-by-receiver" | "held" | "free" | "unknown";
+     /**
+      * Collab replication tap: invoked for every appended entry with the
+      * in-memory (pre-blob-externalization) entry, so inline images survive.
+diff --git a/dist/types/tools/index.d.ts b/dist/types/tools/index.d.ts
+index ccae64279528b92686a68e30c38d3dcdec12dde8..47bf4eee1032243730a548543608434c60497a6c 100644
+--- a/dist/types/tools/index.d.ts
++++ b/dist/types/tools/index.d.ts
+@@ -169,6 +169,8 @@ export interface ToolSession {
+     tuiTranscript?: boolean;
+     /** Whether this session has begun disposal. */
+     isDisposed?: () => boolean;
++    /** Record a started native process; `exited` settles once it is gone. */
++    trackProcessExit?: (exited: Promise<unknown>, jobId?: string) => void;
+     /**
+      * Suppress the spawn specialization/coordination advisory appended to `task`
+      * results. Set by internal/programmatic callers (e.g. the commit agent's
+diff --git a/src/cli.ts b/src/cli.ts
+index 6d948cb5ac12d3f0c57deca5912df89c4dbf6089..b69a4868d3932bddaedd3301be9ed7f9f67e4ab8 100755
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -37,6 +37,7 @@ import {
+ import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
+ import { isNativeShell, runNativeShell } from "./cli/native-shell";
+ import { extractProfileFlags } from "./cli/profile-bootstrap";
++import { EXECUTOR_CAPABILITIES } from "./session/executor-session-lifecycle";
+ import { isStartupPrepaintSafe } from "./cli/startup-prepaint";
+ import {
+ 	AUTO_UPDATE_WORKER_ARG,
+@@ -417,11 +418,15 @@ let runningCommand: string | undefined;
+ 
+ /** Run the CLI with the given argv (no `process.argv` prefix). */
+ export async function runCli(argv: string[]): Promise<void> {
+-	// `omp zsh|bash|sh [args...]`: the whole argv belongs to the shell (`--help`,
+-	// `--profile`, `-c` included), so it dispatches before profile bootstrap,
+-	// prepaint, network setup and the command table.
++	if (argv[0] === "__omp_executor_capabilities") {
++		if (argv.length !== 2 || argv[1] !== "--json") throw new Error("Usage: __omp_executor_capabilities --json");
++		process.stdout.write(`${JSON.stringify(EXECUTOR_CAPABILITIES)}\n`);
++		return;
++	}
++	// Native shell argv belongs to the shell, before profile/bootstrap work.
+ 	if (isNativeShell(argv[0])) {
+ 		await runNativeShell(argv);
++		return;
+ 	}
+ 	// A shell process (a named service, a pty command): the argv after the
+ 	// selector is its own, its command's flags included, so it dispatches
+diff --git a/src/cli/args.ts b/src/cli/args.ts
+index 293fa437006d4e639685ebfa2f5f5914b0f1b8af..c0d779f067dd44b2a96deac75f7b065cc6c434bc 100644
+--- a/src/cli/args.ts
++++ b/src/cli/args.ts
+@@ -60,6 +60,7 @@ export interface Args {
+ 	externalThinking?: boolean;
+ 	continue?: boolean;
+ 	resume?: string | true;
++	resumeExact?: string;
+ 	/**
+ 	 * `--restore`: resume the session {@link resume} names, then go on with what its last
+ 	 * process left unfinished (the turn it was in, the subagents it was running).
+@@ -147,7 +148,7 @@ export function validateGoalLaunch(args: Args, interactive: boolean): void {
+ 	if (!interactive) {
+ 		throw new CliUsageError("--goal requires an interactive terminal (not --print or --mode).");
+ 	}
+-	if (args.continue || args.resume || args.fork || args.fromClaude || args.fromCodex) {
++	if (args.continue || args.resume || args.resumeExact || args.fork || args.fromClaude || args.fromCodex) {
+ 		throw new CliUsageError("--goal requires a fresh session (no resume, continue, fork, or import).");
+ 	}
+ }
+@@ -162,7 +163,7 @@ export function validateRestoreLaunch(args: Args, interactive: boolean): void {
+ 	if (!interactive) {
+ 		throw new CliUsageError("--restore requires an interactive terminal (not --print or --mode).");
+ 	}
+-	if (args.continue || args.fork || args.fromClaude || args.fromCodex || args.noSession || args.goal !== undefined) {
++	if (args.continue || args.resumeExact || args.fork || args.fromClaude || args.fromCodex || args.noSession || args.goal !== undefined) {
+ 		throw new CliUsageError(
+ 			"--restore resumes one existing session (no continue, fork, import, goal, or --no-session).",
+ 		);
+diff --git a/src/cli/flag-tables.ts b/src/cli/flag-tables.ts
+index ab175783d8df51e4a16c8524beb4e8762be9dc18..4cfcd94f89e5cdccc396e8e5f24880a18ee7df93 100644
+--- a/src/cli/flag-tables.ts
++++ b/src/cli/flag-tables.ts
+@@ -152,6 +152,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
+ 	"--fork": (result, value) => {
+ 		result.fork = value;
+ 	},
++	"--resume-exact": (result, value) => {
++		result.resumeExact = value;
++	},
+ 	"--provider": (result, value) => {
+ 		result.provider = value;
+ 	},
+@@ -433,6 +436,7 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
+  */
+ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
+ 	"--resume": true,
++	"--resume-exact": true,
+ 	"-r": true,
+ 	"--restore": true,
+ 	"--session": true,
+diff --git a/src/exec/bash-executor.ts b/src/exec/bash-executor.ts
+index b00ddfbbde8d13910371ec0bb91e3144859fa635..5ef54a537bc834ed811e77e2ce8e39ad8ab70309 100644
+--- a/src/exec/bash-executor.ts
++++ b/src/exec/bash-executor.ts
+@@ -101,6 +101,19 @@ export interface BashExecutorOptions {
+ 	 * user-shell paths.
+ 	 */
+ 	onStart?: (pids: () => readonly number[]) => void;
++	/**
++	 * Invoked once the embedded shell starts the command, with a promise that settles when the
++	 * native run returns and any cancelled child processes have exited. An abort or deadline
++	 * resolves this call as cancelled first; the process can still be running until then. Not
++	 * called on the user-shell PTY path, which already waits.
++	 */
++	onRun?: (exited: Promise<unknown>) => void;
++	/**
++	 * Invoked before the run when the session's persistent shell is busy with
++	 * another command, so this one runs in a one-shot shell instead: it sees
++	 * none of the session's shell state, and the state it sets is discarded.
++	 */
++	onSessionShellBusy?: () => void;
+ 	/**
+ 	 * Asked once the run settles: `false` means the agent session that owns
+ 	 * `sessionKey` was left (new, fork, switch, branch) while the command ran,
+@@ -898,12 +911,20 @@ export async function executeBash(command: string, options?: BashExecutorOptions
+ 	};
+ 	const userSignal = options?.signal;
+ 	const runAbortController = new AbortController();
++	const observedPids = new Set<number>();
++	const captureLivePids = () => {
++		for (const pid of executionShell.pids()) {
++			if (pid > 0) observedPids.add(pid);
++		}
++	};
+ 	let abortCleanupPromise: Promise<void> | undefined;
+ 	const abortShell = (): Promise<void> => {
++		captureLivePids();
+ 		abortCleanupPromise ??= executionShell.abort().catch(() => undefined);
+ 		return abortCleanupPromise;
+ 	};
+ 	const abortCurrentExecution = () => {
++		captureLivePids();
+ 		if (!runAbortController.signal.aborted) {
+ 			runAbortController.abort();
+ 		}
+@@ -983,7 +1004,55 @@ export async function executeBash(command: string, options?: BashExecutorOptions
+ 				}
+ 			},
+ 		);
++		const isPidAlive = (pid: number): boolean => {
++			try {
++				process.kill(pid, 0);
++				return true;
++			} catch (err) {
++				return (err as NodeJS.ErrnoException)?.code === "EPERM";
++			}
++		};
++		const sleepUnref = (ms: number) =>
++			new Promise<void>(resolve => {
++				const timer = setTimeout(resolve, ms);
++				timer.unref?.();
++			});
++		captureLivePids();
+ 		options?.onStart?.(() => executionShell.pids());
++		options?.onRun?.(
++			(async () => {
++				let wasInterrupted = false;
++				try {
++					const runResult = await runPromise;
++					wasInterrupted = Boolean(runResult.cancelled || runResult.timedOut);
++				} catch {
++					wasInterrupted = true;
++				}
++				await Promise.resolve();
++				if (
++					!wasInterrupted &&
++					!runAbortController.signal.aborted &&
++					abortCleanupPromise === undefined &&
++					!userSignal?.aborted
++				) {
++					return;
++				}
++				captureLivePids();
++				await abortCleanupPromise;
++				captureLivePids();
++				const deadline = Date.now() + CANCELLED_RUN_SETTLE_TIMEOUT_MS;
++				while (Date.now() < deadline) {
++					for (const pid of executionShell.pids()) {
++						if (pid > 0 && isPidAlive(pid)) observedPids.add(pid);
++					}
++					for (const pid of [...observedPids]) {
++						if (!isPidAlive(pid)) observedPids.delete(pid);
++					}
++					if (observedPids.size === 0) break;
++					await sleepUnref(25);
++				}
++			})(),
++		);
+ 
+ 		const winner = await Promise.race<
+ 			{ kind: "result"; result: ShellRunResult } | { kind: "timeout" } | { kind: "abort" }
+diff --git a/src/extensibility/extensions/runner.ts b/src/extensibility/extensions/runner.ts
+index e7f9bac1cf7db17ff3c24265fe6b25e0d09f54e5..492cce5513af18451a199fc7ab7105270e5821ea 100644
+--- a/src/extensibility/extensions/runner.ts
++++ b/src/extensibility/extensions/runner.ts
+@@ -1,3 +1,4 @@
++import type { ExecutorSessionLifecycle } from "../../session/executor-session-lifecycle";
+ /**
+  * Extension runner - executes extensions and manages their lifecycle.
+  */
+@@ -200,6 +201,12 @@ function handlerTimeoutForEvent(eventType: string): number {
+ }
+ 
+ const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
++class ProviderRequestCancelled extends Error {
++	constructor(reason: string) {
++		super(`Provider request cancelled: ${reason}`);
++		this.name = "ProviderRequestCancelled";
++	}
++}
+ const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
+ 
+ /** Events after which the session file and id may differ from what child shells last saw. */
+@@ -636,6 +643,7 @@ export class ExtensionRunner {
+ 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
+ 	#createJudge?: (toolName: string) => Judge;
+ 	#createCompletion?: (toolName: string, assertActive: () => void) => ExtensionContext["complete"];
++	#getExecutorLifecycle?: () => ExecutorSessionLifecycle;
+ 	#completionLifetime = new AbortController();
+ 	#pendingCompletions = new Set<Promise<unknown>>();
+ 	#startLiveFn?: ExtensionContextActions["startLive"];
+@@ -1802,6 +1810,11 @@ export class ExtensionRunner {
+ 		this.#createCompletion = createCompletion;
+ 	}
+ 
++	/** The host installs this narrow native capability; never an Engine/database handle. */
++	setExecutorLifecycle(getLifecycle: () => ExecutorSessionLifecycle): void {
++		this.#getExecutorLifecycle = getLifecycle;
++	}
++
+ 	/** Invalidate contexts and cancel requests before a session abort or replacement. */
+ 	cancelCompletions(): void {
+ 		this.#completionLifetime.abort();
+@@ -1868,7 +1881,26 @@ export class ExtensionRunner {
+ 			void this.runtime.sendUserMessage(text, options);
+ 		};
+ 		const getSessionModes = () => this.#sessionModes;
++		const getLifecycle = () => {
++			if (!this.#getExecutorLifecycle || this.sessionId !== sessionId) throw new Error("EXECUTOR_CAPABILITY_REQUIRED");
++			return this.#getExecutorLifecycle();
++		};
+ 		return {
++			bindExecutorTarget: request => getLifecycle().bindExecutorTarget(request),
++			controlSession: request => getLifecycle().controlSession(request),
++			getSessionControlReceipt: requestId => getLifecycle().getSessionControlReceipt(requestId),
++			getSessionActivity: () => getLifecycle().getSessionActivity(),
++			admitExecutorInputs: request => getLifecycle().admitExecutorInputs(request),
++			reconcileExecutorInputs: request => getLifecycle().reconcileExecutorInputs(request),
++			resumeExecutorInputs: request => getLifecycle().resumeExecutorInputs(request),
++			getExecutorInputReceipts: ids => getLifecycle().getExecutorInputReceipts(ids),
++			getExecutorTurnContext: options => getLifecycle().getExecutorTurnContext(options),
++			stopExecutorAssignment: request => getLifecycle().stopExecutorAssignment(request),
++			getExecutorWriterState: () => getLifecycle().getExecutorWriterState(),
++			getExecutorCapabilities: () => getLifecycle().getExecutorCapabilities(),
++			getSourceEvents: request => getLifecycle().getSourceEvents(request),
++			getExecutorEvents: request => getLifecycle().getExecutorEvents(request),
++			appendSourceEvent: event => getLifecycle().appendSourceEvent(event),
+ 			ui: this.#uiContext,
+ 			mode: this.#mode,
+ 			getContextUsage: () => this.#getContextUsageFn(),
+@@ -2425,6 +2457,9 @@ export class ExtensionRunner {
+ 		signal?: AbortSignal,
+ 		agent?: ExtensionAgentIdentity,
+ 	): Promise<ToolCallEventResult | undefined> {
++		if (event.toolName === "ask" && this.#getExecutorLifecycle?.().executorBound) {
++			return { block: true, reason: "Use ticket_report(kind=waiting|blocked, question) for this assignment" };
++		}
+ 		const ctx = this.createContext(undefined, undefined, agent);
+ 		const timeoutMs = normalizeHandlerTimeout(
+ 			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
+@@ -2764,9 +2799,11 @@ export class ExtensionRunner {
+ 			if (!handlers || handlers.length === 0) continue;
+ 
+ 			for (const handler of handlers) {
++				let cancellation: ProviderRequestCancelled | undefined;
+ 				const event: BeforeProviderRequestEvent = {
+ 					type: "before_provider_request",
+ 					payload: currentPayload,
++					cancel: reason => { cancellation ??= new ProviderRequestCancelled(reason); },
+ 				};
+ 				const handlerResult = await this.#runHandlerWithTimeout(
+ 					handler,
+@@ -2777,6 +2814,9 @@ export class ExtensionRunner {
+ 					undefined,
+ 					signal,
+ 				);
++				// Handler failures/timeouts are normally isolated. Explicit cancellation is not:
++				// detect it outside that isolation boundary so no payload reaches transport.
++				if (cancellation) throw cancellation;
+ 				if (handlerResult !== undefined) {
+ 					currentPayload = handlerResult;
+ 				}
+diff --git a/src/extensibility/extensions/types.ts b/src/extensibility/extensions/types.ts
+index 038f5d1d7a448cfbf009f35c648e28cfa3c5473f..8d2a529ba88a8f70c87dc7b39352fb99cddf7113 100644
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -8,6 +8,12 @@
+  * - Interact with the user via UI primitives
+  */
+ 
++import type { ExecutorSessionLifecycle } from "../../session/executor-session-lifecycle";
++export type { ExecutorTarget, ExecutorInput, ExecutorInputReceipt, ExecutorTurnContext, ExecutorStopReceipt, ExecutorStopReason, ExecutorSourceEvent, SessionControlRequest, SessionControlReceipt, NativeSessionActivity } from "../../session/executor-session-lifecycle";
++export type { NativeSourceEvent, NativeSourcePage } from "../../session/executor-source-events";
++export type ExecutorSessionAPI = Pick<ExecutorSessionLifecycle, "controlSession" | "getSessionControlReceipt" | "getSessionActivity" | "bindExecutorTarget" | "admitExecutorInputs" |
++	"reconcileExecutorInputs" | "resumeExecutorInputs" | "getExecutorInputReceipts" | "getExecutorTurnContext" |
++	"stopExecutorAssignment" | "getExecutorWriterState" | "getExecutorCapabilities" | "getSourceEvents" | "appendSourceEvent" | "getExecutorEvents">;
+ import {
+ 	type ExtensionUiComponent,
+ 	type ExtensionUiComponentFactory,
+@@ -797,7 +803,7 @@ export interface ExtensionLiveSession {
+ 	stop(): Promise<void>;
+ }
+ 
+-export interface ExtensionContext {
++export interface ExtensionContext extends ExecutorSessionAPI {
+ 	/** UI methods for user interaction */
+ 	ui: ExtensionUIContext;
+ 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
+@@ -1240,6 +1246,8 @@ export type {
+ export interface BeforeProviderRequestEvent {
+ 	type: "before_provider_request";
+ 	payload: unknown;
++	/** Explicitly refuse this request before transport. Returning a value still only replaces payload. */
++	cancel(reason: string): void;
+ }
+ 
+ /** Fired after a provider response is received, before its stream body is consumed. */
+diff --git a/src/extensibility/shared-events.ts b/src/extensibility/shared-events.ts
+index b6f4fd55960e5db32ea9acbcbe66ff1b65de9201..483feb4261e923d1eb535ea6005e2a59460b926a 100644
+--- a/src/extensibility/shared-events.ts
++++ b/src/extensibility/shared-events.ts
+@@ -220,6 +220,8 @@ export interface AgentStartEvent {
+ export interface AgentEndEvent {
+ 	type: "agent_end";
+ 	messages: AgentMessage[];
++	/** Native final assistant stop reason; not inferred from rendered prose. */
++	stopReason?: string;
+ 	/**
+ 	 * When true, this is not a terminal settle: an automatic continuation is
+ 	 * scheduled, or background work may resume the session. See
+diff --git a/src/main.ts b/src/main.ts
+index 17d546657b89bf143cf669680c281b0cd61fbe21..1ab974be282cf4156bc00e61cbde2d20c7c36af7 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -131,6 +131,7 @@ import {
+ } from "./session/session-listing";
+ import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+ import { forkIfMovedAway } from "./session/session-transfer";
++import { EXECUTOR_CAPABILITIES } from "./session/executor-session-lifecycle";
+ import { shouldShowStartupSplash } from "./startup-splash";
+ import {
+ 	discoverSystemPromptOverride,
+@@ -484,8 +485,7 @@ export async function submitInteractiveInput(
+ 			};
+ 			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
+ 		} else if (input.resume) {
+-			// No queue intent: a continue shortcut interrupts a running turn instead.
+-			await session.resume();
++			await session.resume({ executorHumanInputId: input.executorHumanInputId });
+ 		} else if (isKnownSkillCommand(skillHost, input.text)) {
+ 			// Resubmitted skill text must dispatch through the skill path, or the
+ 			// model receives a literal `/skill:` token.
+@@ -503,6 +503,7 @@ export async function submitInteractiveInput(
+ 					images: input.images,
+ 					streamingBehavior,
+ 					followUps: input.followUps,
++					executorHumanInputId: input.executorHumanInputId,
+ 				});
+ 			} catch (error: unknown) {
+ 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+@@ -932,7 +933,7 @@ function exitForSessionResolutionError(error: SessionResolutionError): never {
+ }
+ 
+ function resolveForeignSessionSource(
+-	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume">,
++	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume" | "resumeExact">,
+ ): ForeignSessionSource | undefined {
+ 	if (parsed.fromClaude && parsed.fromCodex) {
+ 		throw new SessionResolutionError("--from-claude and --from-codex cannot be used together");
+@@ -942,8 +943,8 @@ function resolveForeignSessionSource(
+ 	if (parsed.noSession) {
+ 		throw new SessionResolutionError(`--from-${source} requires session persistence`);
+ 	}
+-	if (parsed.continue || parsed.resume || parsed.fork) {
+-		throw new SessionResolutionError(`--from-${source} cannot be combined with --continue, --resume, or --fork`);
++	if (parsed.continue || parsed.resume || parsed.resumeExact || parsed.fork) {
++		throw new SessionResolutionError(`--from-${source} cannot be combined with --continue, --resume, --resume-exact, or --fork`);
+ 	}
+ 	return source;
+ }
+@@ -1244,7 +1245,7 @@ export function watchScopedModelSettings(
+ const SESSION_ID_ARG_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+ 
+ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly string[]): void {
+-	if (!parsed.continue || parsed.resume || parsed.fork) return;
++	if (!parsed.continue || parsed.resume || parsed.resumeExact || parsed.fork) return;
+ 
+ 	let message: string | undefined;
+ 	if (parsed.unrecognizedFlags.length === 0 && parsed.messages.length === 1) {
+@@ -1291,6 +1292,25 @@ export async function createSessionManager(
+ 		onSessionContinuation?: (continuation: SessionContinuation) => void;
+ 	} = {},
+ ): Promise<SessionManager | undefined> {
++	if (parsed.resumeExact !== undefined) {
++		if (parsed.continue || parsed.resume || parsed.fork || parsed.restore || parsed.noSession ||
++			parsed.fromClaude || parsed.fromCodex || parsed.goal !== undefined || !parsed.resumeExact) {
++			throw new SessionResolutionError("--resume-exact requires one file and cannot be combined with another session selector");
++		}
++		const controller = new AbortController();
++		const cancel = () => controller.abort(new Error("Exact resume cancelled"));
++		process.once("SIGINT", cancel);
++		process.once("SIGTERM", cancel);
++		try {
++			return await SessionManager.openExact(parsed.resumeExact, {
++				signal: controller.signal,
++				onWaiting: () => process.stderr.write("Waiting for original session writer to release\n"),
++			});
++		} finally {
++			process.removeListener("SIGINT", cancel);
++			process.removeListener("SIGTERM", cancel);
++		}
++	}
+ 	if (parsed.fork) {
+ 		if (parsed.noSession) {
+ 			throw new SessionResolutionError("--fork requires session persistence");
+@@ -1456,7 +1476,7 @@ export async function buildSessionOptions(
+ 		cwd: parsed.cwd ?? getProjectDir(),
+ 		autoApprove: parsed.autoApprove ?? false,
+ 	};
+-	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
++	const restoringSession = Boolean(parsed.continue || parsed.resume || parsed.resumeExact || isForeignSessionImport(parsed));
+ 	if (parsed.serviceTier !== undefined) {
+ 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
+ 	}
+@@ -2135,6 +2155,7 @@ export async function runRootCommand(
+ 		const explicitSessionSelection = Boolean(
+ 			parsedArgs.continue ||
+ 			parsedArgs.resume ||
++			parsedArgs.resumeExact ||
+ 			parsedArgs.fork ||
+ 			parsedArgs.restore ||
+ 			isForeignSessionImport(parsedArgs),
+@@ -2225,7 +2246,7 @@ export async function runRootCommand(
+ 		// Only createSessionManager's implicit auto-resume promotes continue here.
+ 		const autoResumed = !explicitSessionSelection && parsedArgs.continue === true;
+ 
+-		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager && !parsedArgs.noSession) {
++		if ((typeof parsedArgs.resume === "string" || parsedArgs.resumeExact || foreignSource) && sessionManager && !parsedArgs.noSession) {
+ 			const previousCwd = cwd;
+ 			const recordedCwd = sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
+ 			const resumedProject = await switchToResumedProject(
+@@ -2345,7 +2366,7 @@ export async function runRootCommand(
+ 			if (isInteractive) notifs.push({ kind: "warn", message: notice });
+ 			else process.stderr.write(`${chalk.yellow(notice)}\n`);
+ 		}
+-		if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource)) {
++		if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.resumeExact || parsedArgs.fork || foreignSource)) {
+ 			const pendingToolWarning = describePendingToolCalls(sessionManager.getBranch());
+ 			if (pendingToolWarning) {
+ 				logger.warn("Resumed session has pending tool calls", {
+@@ -2511,7 +2532,7 @@ export async function runRootCommand(
+ 				isInteractive &&
+ 				parsedArgs.unrecognizedFlags.length === 0 &&
+ 				!parsedArgs.tools?.length &&
+-				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || parsedArgs.restore || foreignSource);
++				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.resumeExact || parsedArgs.fork || parsedArgs.restore || foreignSource);
+ 			const extensionsResult = parsedArgs.trustedExtensions?.length
+ 				? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
+ 				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+@@ -2589,7 +2610,7 @@ export async function runRootCommand(
+ 			const showStartupSplash = shouldShowStartupSplash({
+ 				configured: cfgStartupShowSplash.get(settingsInstance),
+ 				isInteractive,
+-				resuming: Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
++				resuming: Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.resumeExact || parsedArgs.fork || foreignSource),
+ 				quiet: cfgStartupQuiet.get(settingsInstance),
+ 				timing: Boolean($env.PI_TIMING),
+ 				stdinIsTTY: process.stdin.isTTY,
+@@ -2884,7 +2905,7 @@ export async function runRootCommand(
+ 						setToolUIContext,
+ 						lspServers,
+ 						mcpManager,
+-						Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
++						Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.resumeExact || parsedArgs.fork || foreignSource),
+ 						deps.forceSetupWizard === true,
+ 						showStartupSplash,
+ 						eventBus,
+@@ -2933,6 +2954,11 @@ export async function runRootCommand(
+ }
+ 
+ export async function main(args: string[]): Promise<void> {
++	if (args[0] === "__omp_executor_capabilities") {
++		if (args.length !== 2 || args[1] !== "--json") throw new Error("Usage: __omp_executor_capabilities --json");
++		process.stdout.write(`${JSON.stringify(EXECUTOR_CAPABILITIES)}\n`);
++		return;
++	}
+ 	registerLocalInferenceApi();
+ 	const { runCli } = await import("./cli");
+ 	await runCli(args.length === 0 ? ["launch"] : args);
+diff --git a/src/modes/controllers/extension-ui-controller.ts b/src/modes/controllers/extension-ui-controller.ts
+index fc7c247598bd64cad5dd826ffa2f9848b106d245..ae083f69fc4f24b1fa17389ee73b70b76dac66b3 100644
+--- a/src/modes/controllers/extension-ui-controller.ts
++++ b/src/modes/controllers/extension-ui-controller.ts
+@@ -147,6 +147,7 @@ export class ExtensionUiController {
+ 	// selector / input / editor modals, so only one may be presented at a time;
+ 	// the rest queue. See `#presentDialog`.
+ 	#dialogActive = false;
++	#customDialogCount = 0;
+ 	#dialogQueue: Array<() => void> = [];
+ 	/** The local ask shown above the composer (`#mountAsk`). */
+ 	#ask: Component | undefined;
+@@ -166,6 +167,11 @@ export class ExtensionUiController {
+ 	#toolUIContext: ExtensionUIContext | undefined;
+ 	constructor(private ctx: InteractiveModeContext) {}
+ 
++	/** A native human interaction still owns a selection, including async/hidden custom forms. */
++	hasPendingDialog(): boolean {
++		return this.#dialogActive || this.#dialogQueue.length > 0 || this.#customDialogCount > 0;
++	}
++
+ 	#syncExtensionComposerShapes(): void {
+ 		this.disposeComposerShapes();
+ 		for (const definition of this.ctx.session.extensionRunner?.getComposerShapes() ?? []) {
+@@ -1651,6 +1657,7 @@ export class ExtensionUiController {
+ 		let closed = false;
+ 		let editorReplaced = false;
+ 
++		this.#customDialogCount++;
+ 		const cleanup = () => {
+ 			component?.dispose?.();
+ 			overlayHandle?.hide();
+@@ -1665,6 +1672,7 @@ export class ExtensionUiController {
+ 		};
+ 		const finish = (settle: () => void) => {
+ 			if (closed) return;
++			this.#customDialogCount--;
+ 			closed = true;
+ 			options?.signal?.removeEventListener("abort", onAbort);
+ 			try {
+diff --git a/src/modes/controllers/input-controller.ts b/src/modes/controllers/input-controller.ts
+index 69efcbcfc11b18182fbd97ec266b00a3e4083fb7..e593f7d5f545393e7afcf51fcd4d1827797f945a 100644
+--- a/src/modes/controllers/input-controller.ts
++++ b/src/modes/controllers/input-controller.ts
+@@ -1164,9 +1164,9 @@ export class InputController {
+ 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
+ 				if (this.ctx.onInputCallback) {
+ 					this.ctx.editor.clearDraft();
+-					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
++					const executorHumanInputId = this.ctx.session.interactiveExecutorInputId;
++					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true, executorHumanInputId });
+ 				} else if (this.ctx.session.isStreaming) {
+-					// The input loop is parked on the running turn's prompt; resume here.
+ 					this.ctx.editor.clearDraft();
+ 					try {
+ 						await this.ctx.session.resume();
+@@ -1483,6 +1483,7 @@ export class InputController {
+ 				const submission = this.ctx.startPendingSubmission(
+ 					{
+ 						text,
++						executorHumanInputId: this.ctx.session.interactiveExecutorInputId,
+ 						images,
+ 						imageLinks: inputImageLinks,
+ 						streamingBehavior: "steer",
+@@ -1538,7 +1539,9 @@ export class InputController {
+ 		};
+ 		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
+ 		// expansion, `/queue`, mode commands), the same as for the follow-up key.
+-		this.ctx.editor.onSubmit = text => this.#trackSubmission(() => submit(text));
++		this.ctx.editor.onSubmit = text => this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer ?
++			this.#trackSubmission(() => submit(text)) :
++			this.ctx.session.withInteractiveInput(text, () => this.#trackSubmission(() => submit(text)));
+ 	}
+ 
+ 	/**
+@@ -1930,6 +1933,7 @@ export class InputController {
+ 		if (compaction.length > 0) {
+ 			const last = compaction[compaction.length - 1];
+ 			this.ctx.compactionQueuedMessages = compaction.slice(0, -1);
++			if (last.executorHumanSubmissionId) this.ctx.session.executorLifecycle.finishInteractiveSubmission(last.executorHumanSubmissionId);
+ 			return { text: last.text, images: last.images, queue: last.mode === "steer" ? "steering" : "followUp" };
+ 		}
+ 		if (yieldCompaction) {
+@@ -2163,6 +2167,11 @@ export class InputController {
+ 
+ 	/** Send editor text as a follow-up message (queued behind current stream). */
+ 	async handleFollowUp(): Promise<void> {
++		if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) return this.#handleInteractiveFollowUp();
++		return this.ctx.session.withInteractiveInput(this.ctx.editor.getExpandedText().trim(), () => this.#handleInteractiveFollowUp());
++	}
++
++	async #handleInteractiveFollowUp(): Promise<void> {
+ 		let text = this.#compactDraftImages(this.ctx.editor.getExpandedText().trim());
+ 		let images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
+ 		let imageLinks =
+@@ -2345,6 +2354,7 @@ export class InputController {
+ 		// advertises; otherwise a skill/text queued during compaction is stranded.
+ 		const compactionQueued = this.ctx.compactionQueuedMessages;
+ 		this.ctx.compactionQueuedMessages = [];
++		for (const message of compactionQueued) if (message.executorHumanSubmissionId) this.ctx.session.executorLifecycle.finishInteractiveSubmission(message.executorHumanSubmissionId);
+ 		const yieldCompaction = this.ctx.yieldCompaction;
+ 		this.ctx.yieldCompaction = undefined;
+ 		const allQueued = [
+@@ -2373,6 +2383,7 @@ export class InputController {
+ 		if (!request && held.length === 0) return;
+ 		this.ctx.yieldCompaction = undefined;
+ 		this.ctx.compactionQueuedMessages = [];
++		for (const message of held) if (message.executorHumanSubmissionId) this.ctx.session.executorLifecycle.finishInteractiveSubmission(message.executorHumanSubmissionId);
+ 		this.#restoreEntriesToEditor([
+ 			...(request ? [{ text: request.text }] : []),
+ 			...held.map(e => ({ text: e.text, images: e.images })),
+diff --git a/src/modes/interactive-mode.ts b/src/modes/interactive-mode.ts
+index 54214a4641bc176de6da540a1aba2659411ab01b..4bd2c2053f02168f3da62e782ef6e788baf1921e 100644
+--- a/src/modes/interactive-mode.ts
++++ b/src/modes/interactive-mode.ts
+@@ -2701,6 +2701,29 @@ export class InteractiveMode implements InteractiveModeContext {
+ 				});
+ 			},
+ 		});
++		this.session.setSessionCloseHandler({
++			blockedReason: () => {
++				if (!this.isInitialized || this.isShuttingDown || this.hasPendingSubmission() ||
++					this.compactionQueuedMessages.length || this.yieldCompaction || this.pendingTools.size ||
++					this.#loopConditionAbort || this.#loopAutoSubmitTimer || this.#goalContinuationTimer ||
++					this.#pendingLoopIterations || this.#pendingGoalContinuationTurns ||
++					this.#liveCommandController.active || this.#btwController.hasActiveRequest()) return "SESSION_BUSY";
++				if (this.ui.hasOverlay() || this.#extensionUiController.hasPendingDialog()) return "SESSION_PENDING_HUMAN_INTERACTION";
++				if (this.#inputController.getDraftText().length || this.editor.pendingImages.length) return "SESSION_DRAFT";
++				return undefined;
++			},
++			shutdown: () => this.shutdown(),
++		});
++		this.session.setExecutorStopModeHandler({
++			beforeAbort: () => {
++				if (this.loopModeEnabled) this.disableLoopMode("Executor assignment stopped. Loop mode disabled.");
++				this.cancelGoalContinuation();
++			},
++			afterAbort: async () => {
++				if (this.loopModeEnabled) this.disableLoopMode("Executor assignment stopped. Loop mode disabled.");
++				if (this.goalModeEnabled && !this.#isShuttingDown) await this.#pauseGoalAction();
++			},
++		});
+ 		// Forward the postmortem reason (SIGTERM/SIGHUP/uncaughtException/…) so the
+ 		// persisted `session_exit` diagnostic carries the real trigger. Postmortem
+ 		// runs callbacks in REVERSE registration order — this callback (registered
+@@ -3639,7 +3662,13 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
+ 			return;
+ 		}
+-		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
++		this.onInputCallback(
++			this.startPendingSubmission(
++				this.session.hasBoundExecutorTarget
++					? { text: prompt, customType: "loop-continuation", display: true }
++					: { text: prompt },
++			),
++		);
+ 	}
+ 
+ 	/** One loop iteration; while it runs, idle maintenance treats the loop's next turn as scheduled. */
+@@ -4228,6 +4257,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	startPendingSubmission(
+ 		input: {
+ 			text: string;
++			executorHumanInputId?: string;
+ 			images?: ImageContent[];
+ 			imageLinks?: (string | undefined)[];
+ 			customType?: string;
+@@ -4239,6 +4269,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	): SubmittedUserInput {
+ 		const submission: SubmittedUserInput = {
+ 			text: input.text,
++			executorHumanInputId: input.executorHumanInputId,
+ 			images: input.images,
+ 			imageLinks: input.imageLinks,
+ 			customType: input.customType,
+diff --git a/src/modes/types.ts b/src/modes/types.ts
+index 89a97114b1453211b84d2aeca2131cb93c4ef4bb..2ce819c97203a8f4e206717312d950bdd558d6c3 100644
+--- a/src/modes/types.ts
++++ b/src/modes/types.ts
+@@ -72,6 +72,8 @@ export type CompactionQueuedMessage = {
+ 	text: string;
+ 	mode: "steer" | "followUp";
+ 	images?: ImageContent[];
++	/** Original native composer reservation, retained across manual/auto compaction. */
++	executorHumanSubmissionId?: string;
+ };
+ 
+ /**
+@@ -88,6 +90,7 @@ export type YieldCompaction = ConversationPosition & {
+ 
+ export type SubmittedUserInput = {
+ 	text: string;
++	executorHumanInputId?: string;
+ 	images?: ImageContent[];
+ 	imageLinks?: (string | undefined)[];
+ 	customType?: string;
+@@ -502,6 +505,7 @@ export interface InteractiveModeContext {
+ 	startPendingSubmission(
+ 		input: {
+ 			text: string;
++			executorHumanInputId?: string;
+ 			images?: ImageContent[];
+ 			imageLinks?: (string | undefined)[];
+ 			customType?: string;
+diff --git a/src/modes/utils/ui-helpers.ts b/src/modes/utils/ui-helpers.ts
+index 1df42bed021089081d87c6cd364fe33dd0c32b4c..6ce892aa35191376a7f75584ca272725cb1b9a2e 100644
+--- a/src/modes/utils/ui-helpers.ts
++++ b/src/modes/utils/ui-helpers.ts
+@@ -1374,7 +1374,8 @@ export class UiHelpers {
+ 		options?: { preserveDraft?: boolean },
+ 	): void {
+ 		const queuedImages = images && images.length > 0 ? images : undefined;
+-		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
++		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages,
++			executorHumanSubmissionId: this.ctx.session.deferInteractiveSubmission() } as CompactionQueuedMessage);
+ 		if (options?.preserveDraft) this.ctx.editor.addToHistory(text);
+ 		else this.ctx.editor.clearDraft(text);
+ 		this.ctx.updatePendingMessagesDisplay();
+@@ -1397,6 +1398,10 @@ export class UiHelpers {
+ 		message: CompactionQueuedMessage,
+ 		onQueued: (queued: readonly AgentMessage[]) => void,
+ 	): Promise<void> {
++		return this.ctx.session.withQueuedInteractiveInput(message.text, message.executorHumanSubmissionId,
++			() => this.#dispatchQueuedMessage(message, onQueued));
++	}
++	async #dispatchQueuedMessage(message: CompactionQueuedMessage, onQueued: (queued: readonly AgentMessage[]) => void): Promise<void> {
+ 		const builtin = await executeBuiltinSlashCommand(message.text, {
+ 			ctx: this.ctx,
+ 			input: message.images ? { images: message.images } : undefined,
+@@ -1607,25 +1612,25 @@ export class UiHelpers {
+ 			if (isKnownSkillCommand(this.ctx, first.text)) {
+ 				const built = await buildSkillCommandPrompt(this.ctx, first.text, first.mode, first.images);
+ 				promptPromise = built
+-					? this.ctx.session
++					? this.ctx.session.withQueuedInteractiveInput(first.text, first.executorHumanSubmissionId, () => this.ctx.session
+ 							.promptCustomMessage(built.message, {
+ 								...built.options,
+ 								onPromptQueued: onFirstQueued,
+ 								onPromptAdmitted: onFirstAdmitted,
+-							})
++							}))
+ 							.then(sent => {
+ 								if (sent === false) onFirstDropped();
+ 							}, onFirstFailed)
+ 					: Promise.resolve();
+ 			} else {
+ 				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
+-				promptPromise = this.ctx.session
++				promptPromise = this.ctx.session.withQueuedInteractiveInput(first.text, first.executorHumanSubmissionId, () => this.ctx.session
+ 					.prompt(first.text, {
+ 						streamingBehavior: first.mode === "followUp" ? "followUp" : "steer",
+ 						images: first.images,
+ 						onPromptQueued: onFirstQueued,
+ 						onPromptAdmitted: onFirstAdmitted,
+-					})
++					}))
+ 					.catch((error: unknown) => {
+ 						disposeFirstPrompt();
+ 						onFirstFailed(error);
+diff --git a/src/sdk.ts b/src/sdk.ts
+index 2a99f812652342f08622c666cf552c93fbc3baf0..1260e7024092da339ca1e87c963ae959eedff904 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -2815,6 +2815,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			getTurnBudget: () => sessionManager.getTurnBudget(),
+ 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
+ 			getClientBridge: () => session?.clientBridge,
++			trackProcessExit: (exited, jobId) => session?.trackProcessExit(exited, jobId),
+ 			emitBeforeSubagentSpawn: (event, signal) =>
+ 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
+ 			// Approval reviewers on this session's runner, so eval-prelude host
+@@ -5053,7 +5054,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			createSessionDateCwdReminderJournal(sessionManager),
+ 		);
+ 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
+-			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
++			if (session?.isExecutorCompletionHeld) throw new Error("EXECUTOR_TARGET_AWAITING_BIND");
++			await session?.executorLifecycle.waitForRouterActivation(signal);
++			const transformed = await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
++			if (session?.isExecutorCompletionHeld) throw new Error("EXECUTOR_TARGET_AWAITING_BIND");
++			return transformed;
+ 		};
+ 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model, signal) => {
+ 			await extensionRunner.emitAfterProviderResponse(response, model, signal);
+@@ -5244,20 +5249,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				if (streamOptions?.promptCacheKey === undefined) session?.promoteTaskSiblingCandidate(streamModel);
+ 				const merged: SimpleStreamOptions = {
+ 					...streamOptions,
++					// Providers may omit onPayload's third argument; bind the real loop request signal here.
++					onPayload: (payload, model) => onPayload(payload, model, streamOptions?.signal),
+ 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
+ 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
+ 					omitDemotedReasoning: session?.omitsDemotedReasoning(streamModel) || streamOptions?.omitDemotedReasoning,
+ 				};
+ 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
+ 				// slot: the prompt cache entry's lifetime starts there, not here.
+-				const onPayload = merged.onPayload;
++				const mergedOnPayload = merged.onPayload;
+ 				mainRequestProvider = streamModel.provider;
+ 				const stream = primaryStreamFn(streamModel, context, {
+ 					...merged,
+ 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
+ 					onPayload: (payload, payloadModel, signal) => {
+ 						session.markPromptCacheDispatched(context);
+-						return onPayload?.(payload, payloadModel, signal);
++						return mergedOnPayload?.(payload, payloadModel, signal);
+ 					},
+ 				});
+ 				// A request that waited for a provider slot is checked again when it goes out.
+diff --git a/src/session/agent-session-types.ts b/src/session/agent-session-types.ts
+index 56fe7892e6d7b9fbf6441778218805e2945b6864..acdb8f589d7c13759f4b7eaade53a378566b4113 100644
+--- a/src/session/agent-session-types.ts
++++ b/src/session/agent-session-types.ts
+@@ -450,6 +450,8 @@ export interface AgentSessionConfig {
+ 
+ /** Options for AgentSession.prompt(). */
+ export interface PromptOptions {
++	/** Native interactive admission token. Never inferred from role:user. */
++	executorHumanInputId?: string;
+ 	/** Whether to expand file-based prompt templates (default: true). */
+ 	expandPromptTemplates?: boolean;
+ 	/**
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index 8cb38e9c402ff9b991743e5590b01d4c14e508bc..b7799326abb9363a5fe4f220c1f1a7a5fd444e44 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -19,6 +19,7 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ import { scheduler } from "node:timers/promises";
+ import { isPromise } from "node:util/types";
++import { ExecutorSessionLifecycle, executorInputId, type ExecutorTarget, type ExecutorInput } from "./executor-session-lifecycle";
+ 
+ import {
+ 	type AfterToolCallContext,
+@@ -247,6 +248,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
+ import { hasLiveOwnedService } from "../launch/services";
+ import { USER_AWAIT_ID } from "../registry/agent-awaits";
+ import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
++import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+ import { cfgSecretsEnabled } from "../secrets/settings";
+ import { releaseSharpshooterSession } from "../sharpshooter/backend";
+ import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+@@ -325,6 +327,8 @@ import { type AgentViewSession, isLocalAgentSession } from "./agent-session-hand
+ import {
+ 	asyncJobSnapshot,
+ 	asyncJobTree,
++	jobTreeParents,
++	inJobTree,
+ 	cancelOwnedAsyncJob,
+ 	inspectAsyncJob,
+ 	requestJobTreeCaptions,
+@@ -1068,6 +1072,287 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	readonly instanceKey: string = `${currentThreadId()}:${Snowflake.next()}`;
+ 	readonly agent: Agent;
+ 	readonly sessionManager: SessionManager;
++	#executorLifecycles = new Map<string, { sessionId: string; lifecycle: ExecutorSessionLifecycle }>();
++	get #executorLifecycle() { return this.#executorLifecycles.get(this.sessionManager.getSessionId()); }
++	#interactiveInput = new AsyncLocalStorage<{ originalText: string; reservationId?: string; inputId?: string; deferred?: boolean }>();
++	#executorBaselineModelRequests = new Set<AbortController>();
++	#processRuns = new Set<{ jobId?: string; exited: Promise<void>; done: boolean }>();
++	static #nativeProcessRuns = new Set<{ ownerId?: string; ancestors: Map<string, string>; sessionId: string; jobId?: string; exited: Promise<void> }>();
++	#sessionCloseHandler?: { blockedReason(): string | undefined; shutdown(): Promise<void> };
++	#executorStopModeHandler?: { beforeAbort(): void; afterAbort(): Promise<void> | void };
++	#sessionClosing = false;
++	#interactiveSubmissionCount = 0;
++	setSessionCloseHandler(handler: { blockedReason(): string | undefined; shutdown(): Promise<void> }): void {
++		this.#sessionCloseHandler = handler;
++	}
++	setExecutorStopModeHandler(handler: { beforeAbort(): void; afterAbort(): Promise<void> | void }): void {
++		this.#executorStopModeHandler = handler;
++	}
++	get hasBoundExecutorTarget(): boolean {
++		return Boolean(this.#executorLifecycle?.lifecycle.getExecutorTurnContext().target);
++	}
++	#closeSessionIfIdle(): string | undefined {
++		if (this.#sessionClosing) return undefined;
++		if (!this.#sessionCloseHandler) return "SESSION_CLOSE_HOST_UNAVAILABLE";
++		if (!this.#silentNoticeBoundary() || this.isBusyForSnapshot || this.hasAdmittedSubmission ||
++			this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length || this.#irc.hasPending() ||
++			this.isRunActive || this.wakeSources !== undefined || this.#idleModelSelection || this.#idleModelRequests.size || this.#autolearnCaptureTask ||
++			this.#usagePreflightAbortControllers.size || this.#imageDescriptionAbortControllers.size) return "SESSION_BUSY";
++		const activity = this.executorLifecycle.getSessionActivity();
++		if (activity.runningJobs || activity.runningProcesses || activity.runningSubagents || activity.pendingHumanAdmissions) return "SESSION_BUSY";
++		const reason = this.#sessionCloseHandler.blockedReason();
++		if (reason) return reason;
++		// No await between the final native/UI checks and sealing *all* native admissions.
++		this.#sessionClosing = true;
++		this.beginDispose();
++		const handler = this.#sessionCloseHandler;
++		// Let the receiver flush its closing receipt before the ordinary host teardown exits.
++		setTimeout(() => { void handler.shutdown().catch(error => {
++			logger.error("Session control graceful shutdown failed", { error: String(error) });
++		}); }, 0);
++		return undefined;
++	}
++
++	/**
++	 * Record a native process this session's tools started. Its tool call or job can settle as
++	 * cancelled before the process is reaped; `exited` settles only once the run itself returned.
++	 */
++	trackProcessExit(exited: Promise<unknown>, jobId?: string): void {
++		const run = { jobId, done: false, exited: Promise.resolve(exited).then(() => {}, () => {}) };
++		void run.exited.then(() => { run.done = true; this.#processRuns.delete(run); });
++		this.#processRuns.add(run);
++		// Keep only run evidence, not the child session. A released/tombstoned subagent's
++		// process still belongs to its original tree until the actual exit settles.
++		const ancestors = new Map<string, string>();
++		const parents = jobTreeParents(this.#asyncJobManager);
++		for (let id = this.#agentId; id && !ancestors.has(id); id = parents.get(id)) {
++			const sessionId = id === this.#agentId ? this.sessionManager.getSessionId() :
++				AgentRegistry.global().get(id)?.session?.sessionManager.getSessionId();
++			if (sessionId) ancestors.set(id, sessionId); else break;
++		}
++		const tracked = { ownerId: this.#agentId, ancestors, sessionId: this.sessionManager.getSessionId(), jobId, exited: run.exited };
++		AgentSession.#nativeProcessRuns.add(tracked);
++		void run.exited.then(() => AgentSession.#nativeProcessRuns.delete(tracked));
++	}
++
++	/** Native processes started by this session that have not exited yet. */
++	runningProcesses(): { jobId?: string; exited: Promise<void> }[] {
++		return [...this.#processRuns].filter(run => !run.done).map(({ jobId, exited }) => ({ jobId, exited }));
++	}
++
++	get executorLifecycle(): ExecutorSessionLifecycle {
++		const sessionId = this.sessionManager.getSessionId();
++		if (this.#executorLifecycle?.sessionId !== sessionId) {
++			const lifecycle = new ExecutorSessionLifecycle(this.sessionManager, {
++				queue: (message, delivery) => {
++					if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
++					if (message.role === "custom" && message.customType === "lcp-session-continue") {
++						this.#advisors.autoResumeSuppressed = false;
++						// A new custom input, NOT Agent.continue(): never replay an interrupted tool batch.
++						this.#queueHiddenNextTurnMessage(message, true);
++						return;
++					}
++					this.#allowQueuedMessageDrainRetry();
++					if (delivery === "followUp" && !this.isStreaming && this.#silentNoticeBoundary() && !this.#advisors.autoResumeSuppressed &&
++						lifecycle.isRouterSilentNotice(this.agent.state.messages.at(-1))) {
++						// Agent.continue() polls steering before its first provider call, but only polls
++						// follow-up after a response when the tail is custom. Wake on the actual input,
++						// never on the notice alone, preserving any earlier queued follow-up ordering.
++						this.agent.replaceQueues([...this.agent.peekSteeringQueue(), ...this.agent.peekFollowUpQueue(), message], []);
++					} else if (delivery === "steer") this.agent.steer(message); else this.agent.followUp(message);
++					this.#scheduleIdleQueueDrain();
++				},
++				purge: ids => {
++					const keep = (message: AgentMessage) => !ids.has(executorInputId(message) ?? "");
++					this.agent.replaceQueues(this.agent.peekSteeringQueue().filter(keep), this.agent.peekFollowUpQueue().filter(keep));
++					this.#reconcileQueuedMessageDrain();
++				},
++				jobs: () => {
++					const manager = this.#asyncJobManager;
++					if (!manager) return [];
++					const parents = jobTreeParents(manager);
++					return manager.getRunningJobs().filter(job => inJobTree(job, this.#agentId, parents)).map(job => ({
++						id: job.id, ownerId: job.ownerId, agentId: job.agentId, join: job.promise, cancel: () => {
++							manager?.acknowledgeDeliveries([job.id]);
++							manager?.cancel(job.id, { ownerId: job.ownerId });
++						},
++					}));
++				},
++				subagents: () => {
++					if (!this.#agentId) return [];
++					const parents = jobTreeParents(this.#asyncJobManager);
++					return AgentRegistry.global().list().filter(ref => ref.id !== this.#agentId &&
++						inJobTree({ ownerId: ref.id }, this.#agentId, parents)).map(ref => ({
++							id: ref.id, parentId: ref.parentId, stop: async () => {
++								const live = ref.session;
++								await AgentLifecycleManager.global().release(ref.id, ref, { tombstone: true });
++								// release owns the terminal transition; re-await its idempotent
++								// disposal so its logging boundary cannot hide a failed join.
++								if (live) await live.dispose();
++								// Disposal aborts the child's tools; their processes may outlive it briefly.
++								if (live) await Promise.all(live.runningProcesses().map(run => run.exited));
++							},
++						}));
++				},
++				processes: () => [...AgentSession.#nativeProcessRuns].filter(run =>
++					run.sessionId === sessionId || (this.#agentId !== undefined && run.ancestors.get(this.#agentId) === sessionId)),
++				captureBaseline: () => { this.#executorBaselineModelRequests = new Set(this.#idleModelRequests); },
++				turnRunning: () => this.isStreaming,
++				activity: () => {
++					const parents = jobTreeParents(this.#asyncJobManager);
++					return {
++						runningJobs: (this.#asyncJobManager?.getRunningJobs() ?? []).filter(job => inJobTree(job, this.#agentId, parents)).length,
++						runningProcesses: [...AgentSession.#nativeProcessRuns].filter(run => run.sessionId === sessionId ||
++							(this.#agentId !== undefined && run.ancestors.get(this.#agentId) === sessionId)).length,
++						runningSubagents: this.#agentId ? AgentRegistry.global().list().filter(ref =>
++							ref.id !== this.#agentId && inJobTree({ ownerId: ref.id }, this.#agentId, parents)).length : 0,
++						pendingHumanAdmissions: this.#admittedSubmissionCount + this.#interactiveSubmissionCount,
++						closing: this.#sessionClosing,
++					};
++				},
++				closeSession: () => this.#closeSessionIfIdle(),
++				abort: async () => {
++					this.#executorStopModeHandler?.beforeAbort();
++					await this.abort({ reason: "Executor assignment stopped" });
++					await this.#executorStopModeHandler?.afterAbort();
++				},
++				cancelModelRequests: () => {
++					for (const request of this.#idleModelRequests) if (!this.#executorBaselineModelRequests.has(request)) request.abort();
++				},
++				appendHumanHistory: message => this.sessionManager.appendMessage(message),
++				appendNoticeHistory: message => {
++					if (message.role !== "custom" || message.attribution !== "agent") throw new Error("EXECUTOR_SILENT_ADMISSION_FORBIDDEN");
++					const entryId = this.sessionManager.appendCustomMessageEntry(message.customType, message.content,
++						message.display, message.details, message.attribution, message.timestamp);
++					return entryId;
++				},
++				publishHistory: message => this.#recordWithoutTurn([message]),
++				noticeBoundary: () => this.#silentNoticeBoundary(),
++				resume: recoveryInputIds => {
++					this.#advisors.autoResumeSuppressed = false;
++					// Follow-up is normally read after the next response. A recovery admitted
++					// immediately before this resume must accompany the already-history human
++					// in that first request, not cause a second provider turn afterwards.
++					if (recoveryInputIds.length) {
++						const recovery = new Set(recoveryInputIds);
++						const followUp = this.agent.peekFollowUpQueue();
++						this.agent.replaceQueues([...this.agent.peekSteeringQueue(),
++							...followUp.filter(message => recovery.has(executorInputId(message) ?? ""))],
++							followUp.filter(message => !recovery.has(executorInputId(message) ?? "")));
++					}
++					if (!this.agent.hasQueuedMessages()) {
++						// A late human can precede the previous request's assistant tail.
++						// A native control steer starts the new step without duplicating that user entry.
++						this.agent.steer({ role: "developer", content: [{ type: "text",
++							text: "Process native human input retained since the preceding request under the current assignment. Do not repeat already completed work." }],
++							attribution: "agent", synthetic: true, timestamp: Date.now() });
++					}
++					this.#allowQueuedMessageDrainRetry();
++					this.#scheduleIdleQueueDrain();
++				},
++			});
++			this.#executorLifecycles.set(sessionId, { sessionId, lifecycle });
++			// Notices admitted before a restart but never written flush once, at the first idle boundary.
++			this.#flushSilentNotices();
++		}
++		this.#executorLifecycle!.lifecycle.activateSession();
++		return this.#executorLifecycle!.lifecycle;
++	}
++
++	/**
++	 * A silent notice enters history only while no agent loop holds a context copy or is about to take one:
++	 * not while streaming or executing tools, not with a prompt/auto-continue/retry/agent_end maintenance
++	 * pending, not during compaction or an abort unwind, and not before earlier message persistence lands.
++	 */
++	#silentNoticeBoundary(): boolean {
++		// A run starting from explicit input (prompt, IRC wake, hidden next-turn message) appends that input
++		// after the notices, so leftover post-prompt maintenance does not hold them past it. A pending
++		// auto-continue is different: it resumes from the tail, which must stay the assistant reply.
++		return !this.#isDisposed && this.#unsubscribeAgent !== undefined && !this.agent.state.isStreaming &&
++			this.#promptInFlightCount === 0 && (this.#noticeFlushBeforeInputRun || this.#postPromptTasks.size === 0) &&
++			this.#abortUnwinds.size === 0 && !this.#abortInProgress && this.#messageEndPersistencePending === 0 &&
++			!this.isCompacting && !this.#maintenance.waitForContextReplacement();
++	}
++	#noticeFlushBeforeInputRun = false;
++
++	/** Called whenever one of the boundary's busy conditions may have just cleared, and before a run starts. */
++	#flushSilentNotices(beforeInputRun = false): void {
++		const current = this.#executorLifecycle;
++		if (!current || current.sessionId !== this.sessionManager.getSessionId()) return;
++		this.#noticeFlushBeforeInputRun = beforeInputRun;
++		try {
++			current.lifecycle.flushSilentNotices();
++		} catch (error) {
++			logger.warn("Deferred silent notice flush failed", { error: error instanceof Error ? error.message : String(error) });
++		} finally {
++			this.#noticeFlushBeforeInputRun = false;
++		}
++	}
++
++	/** Only the native composer enters this scope; rpc/extension role:user is not human proof. */
++	withInteractiveInput<T>(text: string, submit: () => T): T {
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
++		const lifecycle = this.#executorLifecycle?.lifecycle;
++		// Every bound submission is reserved, continue shortcuts included: they start a user turn too.
++		const scope: { originalText: string; reservationId?: string; deferred?: boolean } = { originalText: text, reservationId: lifecycle?.beginInteractiveSubmission(text) };
++		const finish = () => {
++			this.#interactiveSubmissionCount--;
++			if (scope.reservationId && !scope.deferred) lifecycle?.finishInteractiveSubmission(scope.reservationId);
++		};
++		try {
++			this.#interactiveSubmissionCount++;
++			const result = this.#interactiveInput.run(scope, submit);
++			if (isPromise(result)) return result.finally(finish) as T;
++			finish();
++			return result;
++		} catch (error) {
++			finish();
++			throw error;
++		}
++	}
++
++	/** Transfer a native reservation to the compaction queue without marking it locally handled. */
++	deferInteractiveSubmission(): string | undefined {
++		const scope = this.#interactiveInput.getStore();
++		if (scope) scope.deferred = true;
++		return scope?.reservationId ?? scope?.inputId;
++	}
++	/** Replay under the queued submitter's token, never the /compact caller's ambient scope. */
++	withQueuedInteractiveInput<T>(text: string, reservationId: string | undefined, submit: () => T): T {
++		const lifecycle = this.#executorLifecycle?.lifecycle;
++		const finish = () => { if (reservationId) lifecycle?.finishInteractiveSubmission(reservationId); };
++		const result = this.#interactiveInput.run({ originalText: text, reservationId }, submit);
++		if (isPromise(result)) return result.then(value => { finish(); return value; }) as T;
++		finish();
++		return result;
++	}
++
++	#assertExecutorMessage(message: Parameters<typeof executorInputId>[0]): void {
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
++		const id = executorInputId(message);
++		if (id) this.executorLifecycle.assertInput(id);
++	}
++	#isRetainedExecutorMessage(message: Parameters<typeof executorInputId>[0]): boolean {
++		const id = executorInputId(message);
++		return id !== undefined && this.executorLifecycle.isRetainedHumanInput(id);
++	}
++	get isExecutorCompletionHeld(): boolean { return this.#executorLifecycle?.lifecycle.hasCompletionHold ?? false; }
++
++	get interactiveExecutorInputId(): string | undefined {
++		const scope = this.#interactiveInput.getStore();
++		if (scope?.reservationId && !scope.inputId) scope.inputId = this.executorLifecycle.admitInteractiveInput(scope.originalText, scope.reservationId);
++		return scope?.inputId;
++	}
++
++	admitExecutorInputs(request: Parameters<ExecutorSessionLifecycle["admitExecutorInputs"]>[0]) {
++		return this.executorLifecycle.admitExecutorInputs(request);
++	}
++	reconcileExecutorInputs(request: Parameters<ExecutorSessionLifecycle["reconcileExecutorInputs"]>[0]) {
++		return this.executorLifecycle.reconcileExecutorInputs(request);
++	}
++	stopExecutorAssignment(request: Parameters<ExecutorSessionLifecycle["stopExecutorAssignment"]>[0]) {
++		return this.executorLifecycle.stopExecutorAssignment(request);
++	}
+ 	readonly settings: Settings;
+ 	/** Session-start policy, independent of the selected project memory backend. */
+ 	readonly memoryEnabled: boolean;
+@@ -1343,6 +1628,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	#fallbackExtensionTimers: ManagedTimers | undefined = undefined;
+ 	#turnIndex = 0;
+ 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
++	#messageEndPersistencePending = 0;
+ 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
+ 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
+ 
+@@ -1601,7 +1887,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		}
+ 	}
+ 
+-	#beginInFlight(): number {
++	#beginInFlight(inputRun = true): number {
++		if (this.#promptInFlightCount === 0) this.#flushSilentNotices(inputRun);
+ 		this.#promptInFlightCount++;
+ 		if (this.#promptInFlightCount === 1) {
+ 			this.#acquirePowerAssertion();
+@@ -1746,6 +2033,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		}
+ 		this.#scheduleQueuedMessageDrain();
+ 		this.#resumeStrandedIrcAsides();
++		// After any continuation above was scheduled: a pending one keeps the notice boundary closed.
++		this.#flushSilentNotices();
+ 	}
+ 
+ 	/** IRC records that arrive after the loop's final aside poll — or while an abort skipped that
+@@ -2304,6 +2593,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			settings: this.settings,
+ 			extensionRunner: () => this.#extensionRunner,
+ 			isStreaming: () => this.isStreaming,
++			trackProcessExit: exited => this.trackProcessExit(exited),
+ 		};
+ 		this.#bash = new BashRunner(bashHost);
+ 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
+@@ -2463,6 +2753,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		this.#promptTemplates = config.promptTemplates ?? [];
+ 		this.#slashCommands = config.slashCommands ?? [];
+ 		this.#extensionRunner = config.extensionRunner;
++		this.#extensionRunner?.setExecutorLifecycle(() => this.executorLifecycle);
+ 		this.#extensionRunner?.setJudgeFactory(toolName =>
+ 			resolveJudge({
+ 				settings: this.settings,
+@@ -3168,6 +3459,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
+ 			buildDisplaySessionContext: model => this.buildDisplaySessionContext(model),
+ 			replaceMessagesFromSessionContext: messages => this.replaceMessagesFromSessionContext(messages),
++			flushSilentNotices: () => this.#flushSilentNotices(),
+ 			persistEvalStateContext: () => {
+ 				// The rewritten history carries no snapshot yet, so always build one.
+ 				const message = this.#buildEvalStateContextMessage([]);
+@@ -3244,6 +3536,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				this.#maintenance.renderArchiveForModel(context.messages),
+ 			),
+ 		);
++		this.addDisposer(this.agent.addBeforeModelCallHook(async (signal, context) => {
++			const lifecycle = this.#executorLifecycle?.lifecycle;
++			if (lifecycle?.hasCompletionHold) throw new Error("EXECUTOR_TARGET_AWAITING_BIND");
++			if (!lifecycle?.hasBoundTarget) return;
++			await this.settleInFlightMessagePersistence();
++			signal?.throwIfAborted();
++			if (lifecycle.hasCompletionHold) throw new Error("EXECUTOR_TARGET_AWAITING_BIND");
++			if (this.#loopEnd) this.#pauseLoop(this.#loopEnd);
++			lifecycle.ensureTurnStarted();
++			// Agent-core transforms this context before emitting input message_end.
++			// Persist only real, currently admitted native inputs at that earlier boundary.
++			for (const message of context.messages) {
++				const id = executorInputId(message);
++				if (!id) continue;
++				const receipt = lifecycle.getExecutorInputReceipts([id])[0];
++				if (!receipt || receipt.purgedAt || receipt.historyEntryId) continue;
++				lifecycle.assertInput(id);
++				await this.#queueMessageEndPersistence(message, this.#promptGeneration);
++			}
++			await this.settleInFlightMessagePersistence();
++			signal?.throwIfAborted();
++			if (lifecycle.hasCompletionHold) throw new Error("EXECUTOR_TARGET_AWAITING_BIND");
++			lifecycle.observeModelInputs(context.messages);
++			this.sessionManager.flushSync();
++		}));
+ 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
+ 		// The gate is registered only while a cap is set: any before-model-call gate also turns a user abort
+ 		// before the next request into a clean stop, which leaves no interrupted turn for `/retry`.
+@@ -4057,10 +4374,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	}
+ 
+ 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
+ 		while (this.#idleModelSelection) await this.#idleModelSelection.promise;
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
+ 		this.#admittedSubmissionCount++;
+ 		try {
+ 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
++			if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
+ 			return await this.#inLogContext(work);
+ 		} finally {
+ 			if (--this.#admittedSubmissionCount === 0) this.#scheduleRunCheck();
+@@ -4535,12 +4855,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	/** Commit messages in emission order without waiting for notification listeners. */
+ 	#queueMessageEndPersistence(message: AgentMessage, promptGeneration: number): Promise<void> {
+ 		const key = sessionMessagePersistenceKey(message);
++		this.#messageEndPersistencePending++;
+ 		const pending = this.#messageEndPersistenceTail
+ 			.then(() => this.#persistMessageEnd(message, promptGeneration))
+ 			.finally(() => {
+ 				if (key !== undefined && this.#pendingMessageEndPersistence.get(key) === pending) {
+ 					this.#pendingMessageEndPersistence.delete(key);
+ 				}
++				if (--this.#messageEndPersistencePending === 0) this.#flushSilentNotices();
+ 			});
+ 		if (key !== undefined) this.#pendingMessageEndPersistence.set(key, pending);
+ 		this.#messageEndPersistenceTail = pending.catch(() => {});
+@@ -4657,6 +4979,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		// A digest entry carries no persistence key, so the memo stays valid across it.
+ 		if (message.role === "assistant") this.#tools.recordReplyPrompt(message);
+ 		const entryId = this.sessionManager.appendMessage(message);
++		this.#executorLifecycle?.lifecycle.enteredHistory(message, entryId);
+ 		if (message.role === "assistant") {
+ 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
+ 		}
+@@ -4771,11 +5094,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			}
+ 			return;
+ 		}
++		const executorId = executorInputId(message);
++		if (executorId && this.#executorLifecycle?.lifecycle.getExecutorInputReceipts([executorId])[0]?.historyEntryId) return;
+ 		if (message.role === "hookMessage" || message.role === "custom") {
+ 			// One-run instructions must not return from persisted history: prewalk
+ 			// nudges are consumed once, and Vibe context is rebuilt only while active.
+ 			if (!isPrewalkPlanNudge(message) && message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE) {
+-				this.sessionManager.appendCustomMessageEntry(
++				const entryId = this.sessionManager.appendCustomMessageEntry(
+ 					message.customType,
+ 					message.content,
+ 					message.display,
+@@ -4787,6 +5112,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 					message.timestamp,
+ 					message.role === "custom" ? message.excludeFromContext : undefined,
+ 				);
++				this.#executorLifecycle?.lifecycle.enteredHistory(message, entryId);
+ 			}
+ 			if (message.role === "custom" && message.customType === "ttsr-injection") {
+ 				this.#ttsr.markInjectedFromDetails(message.details);
+@@ -4963,6 +5289,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			// The previous loop's end lost the race to this start: announce its pause first,
+ 			// so every subscriber sees it before the next loop.
+ 			if (this.#loopEnd) this.#pauseLoop(this.#loopEnd);
++			this.#executorLifecycle?.lifecycle.beginTurn();
+ 			this.#loopEnd = undefined;
+ 			this.#openRun();
+ 			this.#runEpoch++;
+@@ -5765,6 +6092,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 					this.#resolvePostPromptTasks();
+ 					// A skipped or failed continuation never starts its loop: the run may be over.
+ 					this.#scheduleRunCheck();
++					this.#flushSilentNotices();
+ 				}
+ 			});
+ 	}
+@@ -5945,7 +6273,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				}
+ 
+ 				while (this.#idleModelSelection) await this.#idleModelSelection.promise;
+-				const inFlightEpoch = this.#beginInFlight();
++				const inFlightEpoch = this.#beginInFlight(false);
+ 				const coalescedSources = new Set([options.source]);
+ 				let observation: TurnObservation | undefined;
+ 				const onStart = this.#ircWakeTurnObserver
+@@ -6134,6 +6462,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 * execution still emit there).
+ 	 */
+ 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
++		if (this.#executorLifecycle?.lifecycle.hasCompletionHold) return { block: true, reason: "EXECUTOR_TARGET_AWAITING_BIND" };
++		if (this.#executorLifecycle?.lifecycle.executorBound && ctx.tool.name === "ask") {
++			return { block: true, reason: "Use ticket_report(kind=waiting|blocked, question) for this assignment" };
++		}
+ 		const runner = this.#extensionRunner;
+ 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+ 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
+@@ -6282,6 +6614,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	#pauseLoop(end: LoopEnd, awaiting = false): void {
+ 		if (end.paused) return;
+ 		end.paused = true;
++		this.#executorLifecycle?.lifecycle.turnCompleted(
++			end.event.messages.findLast(message => message.role === "assistant")?.stopReason ?? "error", true,
++		);
+ 		void this.#emitSessionEvent({
+ 			type: "agent_pause",
+ 			messages: end.event.messages,
+@@ -6301,6 +6636,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			await this.#extensionRunner?.emit({
+ 				type: "agent_end",
+ 				messages: [...messages],
++				stopReason: messages.findLast(message => message.role === "assistant")?.stopReason ?? "error",
+ 				...(pause ? { willContinue: true } : {}),
+ 				...(pause?.awaiting ? { awaitingAsyncWork: true } : {}),
+ 			});
+@@ -6361,8 +6697,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			return;
+ 		}
+ 		const end = this.#loopEnd;
++		this.#executorLifecycle?.lifecycle.turnCompleted(
++			end.event.messages.findLast(message => message.role === "assistant")?.stopReason ?? "error", false,
++		);
+ 		this.#closeRun();
+-		void this.#emitSessionEvent(end.event).catch(error =>
++		void this.#emitSessionEvent({ ...end.event, isTerminal: true, yielded: true }).catch(error =>
+ 			logger.warn("agent_end session event emission failed", { error: String(error) }),
+ 		);
+ 		// A subscriber may queue input from `agent_end` itself (a collab guest's steer racing
+@@ -6949,6 +7288,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+ 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+ 		this.#scheduleRunCheck();
++		this.#flushSilentNotices();
+ 	}
+ 
+ 	#activeProviderSessionId(sessionId?: string): string {
+@@ -9180,7 +9520,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 * {@link PromptDroppedError} instead.
+ 	 */
+ 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+-		return this.#admitSubmission(() => this.#prompt(text, options));
++		const scope = this.#interactiveInput.getStore();
++		const submission = options?.executorHumanInputId ? { originalText: text, inputId: options.executorHumanInputId } : scope;
++		return this.#interactiveInput.run(submission, () => this.#admitSubmission(() => this.#prompt(text, options)));
+ 	}
+ 
+ 	/**
+@@ -9196,7 +9538,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 * @throws {AgentBusyError} when another turn claims the session between the interrupt and the continuation.
+ 	 * @throws {Error} when there is no conversation to resume.
+ 	 */
+-	async resume(): Promise<void> {
++	async resume(options?: { executorHumanInputId?: string }): Promise<void> {
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
++		if (options?.executorHumanInputId && this.executorLifecycle.isRetainedHumanInput(options.executorHumanInputId)) return;
++		if (this.#executorLifecycle?.lifecycle.hasBoundTarget) {
++			if (this.isStreaming && !options?.executorHumanInputId) throw new AgentBusyError();
++			const executorHumanInputId = options?.executorHumanInputId ?? this.interactiveExecutorInputId;
++			if (!executorHumanInputId) throw new Error("EXECUTOR_INPUT_NOT_ADMITTED");
++			this.executorLifecycle.prepareInteractiveResume(executorHumanInputId);
++			this.#recovery.prepareResume();
++			if (this.isStreaming) {
++				this.agent.followUp({ role: "developer", content: [{ type: "text", text: manualContinuePrompt }],
++					attribution: "user", synthetic: true, userInitiated: true, timestamp: Date.now(),
++					executorInputId: executorHumanInputId } as AgentMessage);
++				this.#allowQueuedMessageDrainRetry();
++				this.#scheduleIdleQueueDrain();
++				return;
++			}
++			await this.#interactiveInput.run({ originalText: ".", inputId: executorHumanInputId }, () => this.prompt(manualContinuePrompt, {
++				synthetic: true,
++				userInitiated: true,
++				expandPromptTemplates: false,
++				executorHumanInputId,
++				streamingBehavior: "followUp",
++			}));
++			return;
++		}
+ 		if (!this.isStreaming) return this.#resumeIdle();
+ 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
+ 		// until the continuation is live, so a host driving this session to a result
+@@ -9500,6 +9867,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				now: true,
+ 			});
+ 		}
++		const executorHumanInputId = options?.executorHumanInputId ?? this.interactiveExecutorInputId;
++		if (executorHumanInputId) options = { ...options, executorHumanInputId };
++		if (executorHumanInputId && this.executorLifecycle.isRetainedHumanInput(executorHumanInputId)) return true;
++		if (options?.executorHumanInputId) this.executorLifecycle.enrollSameTargetHistoryForInteractiveInput(options.executorHumanInputId);
+ 		const message = options?.synthetic
+ 			? {
+ 					role: "developer" as const,
+@@ -9510,6 +9881,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 					userInitiated: options?.userInitiated === true ? true : undefined,
+ 				}
+ 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
++		if (options?.executorHumanInputId) Object.assign(message, { executorInputId: options.executorHumanInputId });
+ 
+ 		const preludeMessages: AgentMessage[] = [];
+ 		if (eagerTodoPrelude) {
+@@ -9607,6 +9979,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			onPromptQueued?: PromptOptions["onPromptQueued"];
+ 		},
+ 	): Promise<boolean> {
++		const executorHumanInputId = this.interactiveExecutorInputId;
++		if (executorHumanInputId) {
++			if (this.executorLifecycle.isRetainedHumanInput(executorHumanInputId)) return true;
++			this.executorLifecycle.enrollSameTargetHistoryForInteractiveInput(executorHumanInputId);
++			message = { ...message, details: { ...(message.details && typeof message.details === "object" ? message.details : {}),
++				executorInputId: executorHumanInputId } };
++		}
+ 		const followUps = this.#createPromptFollowUps(options?.followUps);
+ 		try {
+ 			this.#rejectQueuedExtensionCommands(options?.followUps);
+@@ -9741,6 +10120,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			this.#reportDroppedCustomPrompt(message, options, followUps);
+ 			return true;
+ 		}
++		if (this.#isRetainedExecutorMessage(preparedMessage)) return true;
++		this.#assertExecutorMessage(preparedMessage);
+ 
+ 		// Image normalization and the vision-description call suspend after the
+ 		// isStreaming check above, so a concurrent submission can start a turn in
+@@ -9982,6 +10363,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				commit: () => {
+ 					// No await may separate ownership validation from publishing memory and policy.
+ 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
++					this.#assertExecutorMessage(message);
+ 					if (basePreparation.commit?.() === false) return undefined;
+ 					if (result?.systemPrompt !== undefined) {
+ 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
+@@ -10020,6 +10402,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		// preflight denial) exits silently, and prompt() uses the outcome to hand
+ 		// the typed text back to the host instead of losing it.
+ 		while (this.#idleModelSelection) await this.#idleModelSelection.promise;
++		if (this.#isRetainedExecutorMessage(message)) return true;
++		this.#assertExecutorMessage(message);
+ 		const inFlightEpoch = this.#beginInFlight();
+ 		// Client ownership is reserved by #prompt before dispatch preprocessing
+ 		// and released when its bracket settles; callers that reach this
+@@ -10285,6 +10669,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				this.#planReferenceSent = true;
+ 			}
+ 			try {
++				this.#assertExecutorMessage(message);
+ 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
+ 					// `agent.prompt` claims streaming synchronously before its
+ 					// first await: this callback fires exactly when THIS
+@@ -10347,6 +10732,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		}
+ 	}
+ 
++	#executorExtensionAPI() {
++		const lifecycle = this.executorLifecycle;
++		return {
++			controlSession: lifecycle.controlSession.bind(lifecycle),
++			getSessionControlReceipt: lifecycle.getSessionControlReceipt.bind(lifecycle),
++			getSessionActivity: lifecycle.getSessionActivity.bind(lifecycle),
++			bindExecutorTarget: lifecycle.bindExecutorTarget.bind(lifecycle),
++			admitExecutorInputs: lifecycle.admitExecutorInputs.bind(lifecycle),
++			reconcileExecutorInputs: lifecycle.reconcileExecutorInputs.bind(lifecycle),
++			resumeExecutorInputs: lifecycle.resumeExecutorInputs.bind(lifecycle),
++			getExecutorInputReceipts: lifecycle.getExecutorInputReceipts.bind(lifecycle),
++			getExecutorTurnContext: lifecycle.getExecutorTurnContext.bind(lifecycle),
++			stopExecutorAssignment: lifecycle.stopExecutorAssignment.bind(lifecycle),
++			getExecutorWriterState: lifecycle.getExecutorWriterState.bind(lifecycle),
++			getExecutorCapabilities: lifecycle.getExecutorCapabilities.bind(lifecycle),
++			getSourceEvents: lifecycle.getSourceEvents.bind(lifecycle),
++			getExecutorEvents: lifecycle.getExecutorEvents.bind(lifecycle),
++			appendSourceEvent: lifecycle.appendSourceEvent.bind(lifecycle),
++		};
++	}
++
+ 	#createCommandContext(): ExtensionCommandContext {
+ 		if (this.#extensionRunner) {
+ 			return this.#extensionRunner.createCommandContext();
+@@ -10363,6 +10769,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			// Used only when the session has no extension runner. `createAgentSession` always builds
+ 			// one (carrying the real identity), so only hand-constructed sessions land here.
+ 			agent: TOP_LEVEL_AGENT,
++			...this.#executorExtensionAPI(),
+ 
+ 			model: this.model ?? undefined,
+ 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+@@ -10493,6 +10900,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 * Queue a steering message to interrupt the agent mid-run.
+ 	 */
+ 	async steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
++		return this.#admitSubmission(() => this.#steer(text, images, options));
++	}
++
++	async #steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
+ 		if (text.startsWith("/")) {
+ 			this.#throwIfExtensionCommand(text);
+ 		}
+@@ -10566,6 +10977,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 * flipping advisor auto-resume.
+ 	 */
+ 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
++		return this.#admitSubmission(() => this.#followUp(text, images, options));
++	}
++
++	async #followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
+ 		if (text.startsWith("/")) {
+ 			this.#throwIfExtensionCommand(text);
+ 		}
+@@ -10837,11 +11252,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		) {
+ 			return false;
+ 		}
++		const admittedHumanId = this.interactiveExecutorInputId;
++		if (admittedHumanId && this.executorLifecycle.isRetainedHumanInput(admittedHumanId)) return true;
++		if (admittedHumanId) this.executorLifecycle.enrollSameTargetHistoryForInteractiveInput(admittedHumanId);
+ 		if (mode === "aside") {
+ 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+ 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
+ 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
+ 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
++			const executorHumanInputId = this.interactiveExecutorInputId;
++			if (executorHumanInputId) Object.assign(userMessage, { executorInputId: executorHumanInputId });
+ 			this.#queuedMessageRawText.set(userMessage, rawText);
+ 			records.push(userMessage);
+ 			this.#irc.queueAside(records);
+@@ -10862,6 +11282,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			attribution,
+ 			timestamp ?? Date.now(),
+ 			rawText,
++			this.interactiveExecutorInputId,
+ 		);
+ 		options?.onPromptQueued?.(queued);
+ 		options?.onPromptAdmitted?.();
+@@ -10885,12 +11306,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		attribution: MessageAttribution,
+ 		timestamp: number,
+ 		rawText: string,
++		executorHumanInputId?: string,
+ 	): AgentMessage[] {
+ 		this.#allowQueuedMessageDrainRetry();
+ 		const userMessage: AgentMessage =
+ 			mode === "followUp"
+ 				? { role: "user", content, attribution, timestamp }
+ 				: { role: "user", content, steering: true, attribution, timestamp };
++		if (executorHumanInputId) Object.assign(userMessage, { executorInputId: executorHumanInputId });
+ 		this.#queuedMessageRawText.set(userMessage, rawText);
+ 		const group = [...companions, userMessage];
+ 		if (mode === "followUp") {
+@@ -11213,6 +11636,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	}
+ 
+ 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
+ 		this.#pendingNextTurnMessages.push(message);
+ 		if (!triggerTurn) return;
+ 		const generation = this.#promptGeneration;
+@@ -11231,7 +11655,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				try {
+ 					await this.#promptQueuedHiddenNextTurnMessages();
+ 				} catch {
+-					// Leave the hidden next-turn messages queued for the next explicit prompt.
++					// Ordinary hidden inputs stay queued; lifecycle controls expose a durable blocked receipt.
+ 				}
+ 			},
+ 			{
+@@ -11259,13 +11683,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 
+ 		const prependMessages = queuedMessages.slice(0, -1);
+ 		const textContent = this.#getCustomMessageTextContent(message);
++		const sessionId = this.sessionManager.getSessionId();
++		const lifecycle = this.#executorLifecycle?.lifecycle;
++		const previousCostCapRefusal = this.#costCapRefusal;
+ 		try {
+-			await this.#promptWithMessage(message, textContent, {
++			const admitted = await this.#promptWithMessage(message, textContent, {
+ 				prependMessages,
+ 				skipPostPromptRecoveryWait: true,
+ 			});
++			if (!admitted) {
++				if (this.sessionManager.getSessionId() === sessionId) this.#pendingNextTurnMessages = [
++					...queuedMessages.filter(item => item.customType !== "lcp-session-continue"), ...this.#pendingNextTurnMessages];
++				lifecycle?.deferSessionControlQueue(queuedMessages,
++					this.#costCapRefusal !== previousCostCapRefusal ? "SESSION_COST_CAP" : "SESSION_CONTINUE_NOT_ADMITTED");
++			}
+ 		} catch (error) {
+-			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
++			if (this.sessionManager.getSessionId() === sessionId) this.#pendingNextTurnMessages = [
++				...queuedMessages.filter(item => item.customType !== "lcp-session-continue"), ...this.#pendingNextTurnMessages];
++			lifecycle?.deferSessionControlQueue(queuedMessages, "SESSION_CONTINUE_FAILED");
+ 			throw error;
+ 		}
+ 	}
+@@ -11422,8 +11857,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const descriptionNotice = preprocessed
+ 			? preprocessed.descriptionNotice
+ 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
++		if (this.#isRetainedExecutorMessage(normalizedAppMessage)) return;
++		this.#assertExecutorMessage(normalizedAppMessage);
+ 		if (deliverAs === "aside") {
+ 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
++			this.#assertExecutorMessage(normalizedAppMessage);
+ 			// Non-interrupting: rides the same step-boundary aside poll as
+ 			// sendCustomMessage's streaming aside branch — not an agent-core queue
+ 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
+@@ -12833,6 +13271,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		this.#abortInProgress = true;
+ 		const forceQueuedDelivery = userInterrupt && options?.deliverQueuedMessages === true;
+ 		if (forceQueuedDelivery) this.#forcedQueuedMessageDeliveryCount++;
++		this.#executorLifecycle?.lifecycle.cancelPendingHumanResumes();
+ 		const unwind = Promise.withResolvers<void>();
+ 		this.#abortUnwinds.add(unwind.promise);
+ 		try {
+@@ -12925,6 +13364,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			this.#abortUnwinds.delete(unwind.promise);
+ 			unwind.resolve();
+ 			this.#scheduleRunCheck();
++			this.#flushSilentNotices();
+ 		}
+ 	}
+ 
+@@ -14159,6 +14599,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 
+ 	/** Retry the last failed assistant turn when the session is idle. */
+ 	async retry(): Promise<boolean> {
++		if (this.#sessionClosing) throw new Error("SESSION_CLOSING");
++		if (this.#executorLifecycle?.lifecycle.hasBoundTarget) throw new Error("EXECUTOR_RETRY_UNAVAILABLE");
+ 		const didRetry = await this.#recovery.retry(this.#prunedTerminalFailure);
+ 		// A manual retry is the user resuming the run they interrupted, so it lifts the
+ 		// interrupt's auto-resume suppression the same way a typed prompt does.
+@@ -14969,6 +15411,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			// switch rolled back via restoreState); re-read it on the next model call either way.
+ 			this.#sessionInit = undefined;
+ 			await this.sessionManager.setSessionFile(sessionPath);
++			this.#executorLifecycle?.lifecycle.reloadSession();
+ 			this.#bash.markSessionTransition(bashTransition);
+ 			const newCwd = this.sessionManager.getCwd();
+ 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
+diff --git a/src/session/async-job-views.ts b/src/session/async-job-views.ts
+index 7088d565c27b32c9d191e6b0b7cf57f18a6c0071..b57e6d59f00de843203cc86925500f3be673d362 100644
+--- a/src/session/async-job-views.ts
++++ b/src/session/async-job-views.ts
+@@ -59,9 +59,9 @@ export function runningJobWidgets(manager: AsyncJobManagerApi, agentId: string |
+ }
+ 
+ /** Each agent's parent: the registry's link, else the owner of the task job that runs it. */
+-function jobTreeParents(manager: AsyncJobManagerApi): Map<string, string> {
++export function jobTreeParents(manager?: AsyncJobManagerApi): Map<string, string> {
+ 	const parents = new Map<string, string>();
+-	for (const job of [...manager.getRunningJobs(), ...manager.getRecentJobs(Number.POSITIVE_INFINITY)]) {
++	for (const job of [...(manager?.getRunningJobs() ?? []), ...(manager?.getRecentJobs(Number.POSITIVE_INFINITY) ?? [])]) {
+ 		if (job.agentId !== undefined && job.ownerId !== undefined) parents.set(job.agentId, job.ownerId);
+ 	}
+ 	for (const ref of AgentRegistry.global().list()) {
+@@ -71,7 +71,7 @@ function jobTreeParents(manager: AsyncJobManagerApi): Map<string, string> {
+ }
+ 
+ /** Whether `job`'s owner is `rootId` or descends from it; every job when `rootId` is undefined. */
+-function inJobTree(job: AsyncJob, rootId: string | undefined, parents: ReadonlyMap<string, string>): boolean {
++export function inJobTree(job: Pick<AsyncJob, "ownerId">, rootId: string | undefined, parents: ReadonlyMap<string, string>): boolean {
+ 	if (!rootId) return true;
+ 	const seen = new Set<string>();
+ 	for (let id = job.ownerId; id !== undefined && !seen.has(id); id = parents.get(id)) {
+diff --git a/src/session/bash-runner.ts b/src/session/bash-runner.ts
+index c46bafa86874fe65e0c94ae0d26ef9541bca8f1b..0e498a1fef3ece22a65d058d254b73ba3aa75a1f 100644
+--- a/src/session/bash-runner.ts
++++ b/src/session/bash-runner.ts
+@@ -63,6 +63,7 @@ export interface BashRunnerHost {
+ 	settings: Settings;
+ 	extensionRunner(): ExtensionRunner | undefined;
+ 	isStreaming(): boolean;
++	trackProcessExit(exited: Promise<unknown>): void;
+ }
+ 
+ /** Owns bash execution and preserves result ownership across transcript transitions. */
+@@ -142,6 +143,7 @@ export class BashRunner {
+ 					env: shellEnv,
+ 					useUserShell: options?.useUserShell,
+ 					pty: options?.pty,
++					onRun: exited => this.#host.trackProcessExit(exited),
+ 				});
+ 			} finally {
+ 				this.#abortControllers.delete(abortController);
+diff --git a/src/session/executor-session-lifecycle.ts b/src/session/executor-session-lifecycle.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b80835c031e3aa1425f0abf6e9751a69ae4f478d
+--- /dev/null
++++ b/src/session/executor-session-lifecycle.ts
+@@ -0,0 +1,883 @@
++import { randomUUID, createHash } from "node:crypto";
++import { realpathSync } from "node:fs";
++import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
++import type { SessionManager } from "./session-manager";
++import { ExecutorSourceEvents, type NativeSourceEvent } from "./executor-source-events";
++
++export const EXECUTOR_CAPABILITIES = Object.freeze({ feature: "executor-session-lifecycle", version: 1,
++	"exact-resume-v1": true, "input-v2": true, "human-sync-v1": true, "stop-v1": true,
++	"source-events.v1": true, "router-generation-v1": true, "before-provider-cancel-v1": true, "router-handoff-wait-v1": true, "completion-human-preservation-v1": true, "silent-notice-v1": true, "session-lifecycle-control-v1": true });
++export type ExecutorTarget =
++	| { kind: "executor"; ticketId: string; assignmentId: string; claimEpoch: number }
++	| { kind: "router-generation"; generation: number; roleInboxId: string; claimEpoch: number; prepared?: boolean };
++export interface ExecutorInput {
++	id: string; ticketId?: string; kind: string; text: string; triggerId?: string; answerToReportId?: string; createdSeq: number;
++}
++export interface ExecutorInputReceipt {
++	inputId: string; target: ExecutorTarget; admissionSeq: number; queuedAt: string;
++	sessionFile?: string;
++	historyEntryId?: string; historyAt?: string; turnId?: string; turnCompletedAt?: string; purgedAt?: string;
++}
++export interface ExecutorTurnContext {
++	target?: ExecutorTarget; turnId?: string; admissionSeq: number; inputWatermark: number;
++	consumedInputIds: string[]; unadmittedUserEntryIds: string[];
++	pendingHumanSubmissionIds: string[];
++	orphanedHumanSubmissions: { id: string; text: string; target: ExecutorTarget }[];
++}
++export type ExecutorStopReason = "completed" | "human-stop" | "retry" | "scope-replaced" | "host-shutdown";
++export interface ExecutorStopReceipt {
++	assignmentId?: string; target: ExecutorTarget; instanceId: string; gateClosedAt: string; turnAborted: boolean;
++	purgedInputIds: string[]; jobsEnded: string[]; subagentsEnded: string[]; quiescedAt: string;
++	reason: ExecutorStopReason; throughAdmissionSeq?: number; retainedHumanInputIds: string[]; pendingHumanSubmissionIds: string[];
++}
++export interface ExecutorSourceEvent { seq: number; type: string; at: string; data: unknown }
++export interface SessionControlRequest { action: "continue" | "close"; requestId: string }
++export interface SessionControlReceipt { status: "queued" | "closing" | "blocked"; reason?: string; observedAt: string; historyEntryId?: string; historyAt?: string }
++export interface NativeSessionActivity {
++	runningJobs: number; runningProcesses: number; runningSubagents: number; pendingHumanAdmissions: number; closing: boolean;
++}
++const SESSION_CONTINUE_TEXT = "Router coordination request (machine-origin, not a human instruction or new authorization). Review this session's original context and verify the results of any interrupted actions before proceeding. Continue only unfinished work that is still authorized. Do not repeat completed actions or blindly replay an interrupted tool batch. If work is completed, stopped, or waiting for a human decision, report the current state only; do not invent permission or start new work.";
++type StoredInput = { input: ExecutorInput; fingerprint: string; receipt: ExecutorInputReceipt; human?: boolean; wake?: false };
++type LifecycleRecord =
++	| { type: "sessionContinue" | "sessionContinueState"; requestId: string; receipt: SessionControlReceipt }
++	| { type: "bind"; target: ExecutorTarget; baselineJobIds: string[]; baselineSubagentIds: string[] }
++	| { type: "admit"; inputs: StoredInput[] }
++	| { type: "humanSubmission"; id: string; text: string; target: ExecutorTarget }
++	| { type: "humanSubmissionHandled"; id: string }
++	| { type: "unadmittedResolved"; entryIds: string[]; humanSubmissionIds: string[] }
++	| { type: "history"; inputId: string; entryId: string; at: string; turnId?: string }
++	| { type: "humanRetained"; inputIds: string[] }
++	| { type: "humanTaken"; inputIds: string[]; turnId: string }
++	| { type: "inputTaken"; inputIds: string[]; turnId: string }
++	| { type: "purge"; inputIds: string[]; at: string }
++	| { type: "retarget"; inputIds: string[]; target: ExecutorTarget; reconciledHistory?: true }
++	| { type: "turnCompleted"; turnId: string; inputIds: string[]; stopReason: string; willContinue: boolean; at: string; runningJobs: number }
++	| { type: "gateClosed"; target: ExecutorTarget; at: string; reason?: ExecutorStopReason; throughAdmissionSeq?: number }
++	| { type: "quiesced"; receipt: ExecutorStopReceipt };
++export interface ExecutorLifecycleHost {
++	queue(message: AgentMessage, delivery: "followUp" | "steer"): void;
++	purge(inputIds: ReadonlySet<string>): void;
++	subagents?(): { id: string; parentId?: string; stop(): Promise<void> }[];
++	jobs(): { id: string; ownerId?: string; agentId?: string; cancel(): void; join: Promise<void> }[];
++	/** Native shell runs still alive: an aborted tool or job can return before its process exits. */
++	processes?(): { jobId?: string; ownerId?: string; exited: Promise<void> }[];
++	abort(): Promise<void>;
++	turnRunning?(): boolean;
++	activity?(): NativeSessionActivity;
++	closeSession?(): string | undefined;
++	captureBaseline?(): void;
++	cancelModelRequests(): void;
++	appendHumanHistory?(message: AgentMessage): string;
++	appendNoticeHistory?(message: AgentMessage): string;
++	/**
++	 * Whether a silent notice may enter history now: no agent run holds a context copy and none is
++	 * pending (streaming, tool execution, auto-continue, compaction, abort unwind, persistence).
++	 * Without it, the boundary is open whenever no turn is running.
++	 */
++	noticeBoundary?(): boolean;
++	/** Publish standard native message events only after history and its receipt are durable. */
++	publishHistory?(message: AgentMessage): void;
++	resume?(recoveryInputIds: readonly string[]): void;
++}
++const JOURNAL = "executor-session-lifecycle.v1";
++/** Default bound on the stop join; past it the stop is unconfirmed, never fabricated. */
++const STOP_JOIN_TIMEOUT_MS = 10_000;
++export function executorInputId(message: { role?: string; details?: unknown; executorInputId?: string }): string | undefined {
++	if (message.role === "custom" || message.role === undefined) {
++		const details = message.details;
++		return details && typeof details === "object" && "executorInputId" in details &&
++			typeof details.executorInputId === "string" ? details.executorInputId : undefined;
++	}
++	return message.executorInputId;
++}
++function targetKey(target: ExecutorTarget): string {
++	return target.kind === "executor" ? JSON.stringify([target.kind, target.ticketId, target.assignmentId, target.claimEpoch]) :
++		JSON.stringify([target.kind, target.generation, target.roleInboxId, target.claimEpoch]);
++}
++
++/** Native journal is authoritative. The index is rebuilt once per session, never on probe/admission. */
++export class ExecutorSessionLifecycle {
++	readonly instanceId = randomUUID();
++	#target?: ExecutorTarget;
++	#closed = false;
++	#baseline = new Set<string>();
++	#baselineSubagents = new Set<string>();
++	#inputs = new Map<string, StoredInput>();
++	#events: ExecutorSourceEvent[] = [];
++	#admissionSeq = 0;
++	#turnId?: string;
++	#turnActive = false;
++	#turnPrestarted = false;
++	#sourceEvents!: ExecutorSourceEvents;
++	#sessionId: string;
++	#stops = new Map<string, Promise<ExecutorStopReceipt>>();
++	#stopFacts = new Map<string, { gateClosedAt: string; turnAborted: boolean; purgedInputIds: string[] }>();
++	// Fences rebuilt from the journal, so neither a restart nor a closed gate can reopen an older target.
++	#lastBoundKey?: string;
++	#retired = new Set<string>();
++	#maxClaimEpoch = -1;
++	#maxGeneration = new Map<string, number>();
++	#unadmitted = new Map<string, ExecutorTarget>();
++	#humanSubmissions = new Map<string, { text: string; target: ExecutorTarget }>();
++	#queued = new Set<string>();
++	#orphanedHumanSubmissions = new Set<string>();
++	#activationWaiters: (() => void)[] = [];
++	#routerActivationWaiters = new Set<() => void>();
++	#completionTargets = new Map<string, ExecutorTarget>();
++	#completionGateClosed = false;
++	#retainedHuman = new Set<string>();
++	#preservedHuman = new Set<string>();
++	#resumeRequested = new Set<string>();
++	#reconciledHistory = new Set<string>();
++	#continuingHistory = new Set<string>();
++	#historyTargets = new Map<string, ExecutorTarget>();
++	/** Admitted silent notices without history yet; written at the next idle boundary in admission order. */
++	#pendingNotices = new Set<string>();
++	#flushingNotices = false;
++	#sessionControls = new Map<string, SessionControlReceipt>();
++	#queuedSessionControls = new Set<string>();
++	#sessionControlHistory = new Map<string, { historyEntryId: string; historyAt: string }>();
++	constructor(private readonly manager: SessionManager, private readonly host: ExecutorLifecycleHost) {
++		this.#sessionId = manager.getSessionId();
++		this.#rebuildIndex();
++		// Targets are instance capabilities: restart requires an explicit trusted bind.
++		this.#target = undefined;
++		this.#closed = false;
++	}
++	/** After the native manager reloads this journal; commits still require its own writer lease. */
++	reloadSession(): void {
++		this.#assertSession();
++		const target = this.#target, closed = this.#closed, turnId = this.#turnId;
++		const turnActive = this.#turnActive, turnPrestarted = this.#turnPrestarted;
++		const baseline = this.#baseline, baselineSubagents = this.#baselineSubagents;
++		const liveSubmissions = new Set([...this.#humanSubmissions.keys()].filter(id => !this.#orphanedHumanSubmissions.has(id)));
++		const continuingHistory = new Set(this.#continuingHistory);
++		this.#rebuildIndex();
++		for (const id of liveSubmissions) this.#orphanedHumanSubmissions.delete(id);
++		// Preserve this instance's old stop/ownership, never inherit another instance's binding.
++		if (target) {
++			this.#closed = closed || this.#closed || this.#lastBoundKey !== targetKey(target);
++			this.#target = target; this.#turnId = turnId;
++			if (!this.#closed) {
++				this.#turnActive = turnActive;
++				this.#turnPrestarted = turnPrestarted;
++			}
++			this.#baseline = baseline; this.#baselineSubagents = baselineSubagents;
++			if (!this.#closed) for (const id of continuingHistory) {
++				const stored = this.#inputs.get(id);
++				if (stored && !stored.receipt.turnCompletedAt && !stored.receipt.purgedAt && stored.wake !== false &&
++					targetKey(stored.receipt.target) === targetKey(target)) this.#continuingHistory.add(id);
++			}
++		} else { this.#target = undefined; this.#closed = false; }
++	}
++	#rebuildIndex(): void {
++		this.#target = undefined; this.#closed = false;
++		this.#turnActive = false; this.#turnPrestarted = false;
++		this.#inputs.clear(); this.#events = []; this.#admissionSeq = 0;
++		this.#lastBoundKey = undefined; this.#retired.clear(); this.#maxClaimEpoch = -1; this.#maxGeneration.clear();
++		this.#unadmitted.clear(); this.#humanSubmissions.clear(); this.#queued.clear();
++		this.#completionTargets.clear(); this.#completionGateClosed = false; this.#retainedHuman.clear();
++		this.#preservedHuman.clear();
++		this.#resumeRequested.clear();
++		this.#reconciledHistory.clear();
++		this.#continuingHistory.clear();
++		this.#historyTargets.clear();
++		this.#pendingNotices.clear();
++		this.#sessionControls.clear(); this.#queuedSessionControls.clear(); this.#sessionControlHistory.clear();
++		const entries = this.manager.getEntries();
++		this.#sourceEvents = new ExecutorSourceEvents(this.manager, entries);
++		for (const entry of entries) {
++			if (entry.type === "custom" && entry.customType === JOURNAL) {
++				const event = entry.data as ExecutorSourceEvent;
++				if (event.seq !== this.#events.length + 1) throw new Error("SOURCE_EVENT_GAP");
++				this.#events.push(event);
++				this.#apply(event.data as LifecycleRecord);
++			} else if (entry.type === "message" || entry.type === "custom_message") {
++				const message = entry.type === "message" ? entry.message : { role: "custom", attribution: entry.attribution, details: entry.details } as AgentMessage;
++				if (entry.type === "custom_message" && entry.customType === "lcp-session-continue" &&
++					entry.details && typeof entry.details === "object" && "sessionControlRequestId" in entry.details &&
++					typeof entry.details.sessionControlRequestId === "string") this.#sessionControlHistory.set(entry.details.sessionControlRequestId,
++						{ historyEntryId: entry.id, historyAt: entry.timestamp });
++				const id = executorInputId(message);
++				const stored = id ? this.#inputs.get(id) : undefined;
++				// A crash between the real entry and its receipt never duplicates history.
++				if (stored) {
++					if (!this.#historyTargets.has(stored.input.id)) this.#historyTargets.set(stored.input.id, stored.receipt.target);
++					Object.assign(stored.receipt, { historyEntryId: entry.id, historyAt: entry.timestamp, sessionFile: realpathSync(this.manager.getSessionFile()!) });
++				}
++				else if (this.#target && !this.#closed && this.#isUnadmittedUser(message)) this.#unadmitted.set(entry.id, this.#target);
++			}
++		}
++		// Resume intent is instance-local; unfinished work must be explicitly resumed after reload.
++		for (const id of this.#preservedHuman) if (!this.#inputs.get(id)?.receipt.turnCompletedAt) this.#retainedHuman.add(id);
++		// A crash between admission and the idle flush leaves the durable admission as the only record.
++		for (const [id, stored] of this.#inputs) if (stored.wake === false && !stored.receipt.historyEntryId && !stored.receipt.purgedAt) this.#pendingNotices.add(id);
++		this.#orphanedHumanSubmissions = new Set(this.#humanSubmissions.keys());
++	}
++	/** Reuse this journal's index and in-flight joins when the native manager returns to it. */
++	activateSession(): void {
++		this.#assertSession();
++		for (const resolve of this.#activationWaiters.splice(0)) resolve();
++	}
++	#isUnadmittedUser(message: AgentMessage): boolean {
++		return message.role === "user" || (message.role === "custom" && message.attribution === "user");
++	}
++	#assertSession(): void {
++		if (this.manager.getSessionId() !== this.#sessionId) throw new Error("EXECUTOR_SESSION_SWITCHED");
++	}
++	#commit(record: LifecycleRecord): void {
++		this.#assertSession();
++		const event = { seq: this.#events.length + 1, type: record.type, at: new Date().toISOString(), data: record };
++		this.manager.appendExecutorRecord(JOURNAL, event);
++		this.#events.push(event);
++		this.#apply(record);
++	}
++	#apply(record: LifecycleRecord): void {
++		switch (record.type) {
++			case "sessionContinue": this.#sessionControls.set(record.requestId, structuredClone(record.receipt)); break;
++			case "sessionContinueState": this.#sessionControls.set(record.requestId, structuredClone(record.receipt)); break;
++			case "bind": {
++				const key = targetKey(record.target);
++				if (this.#lastBoundKey !== undefined && this.#lastBoundKey !== key) {
++					this.#retired.add(this.#lastBoundKey);
++					this.#continuingHistory.clear();
++					this.#turnActive = false; this.#turnPrestarted = false;
++				}
++				this.#lastBoundKey = key;
++				this.#maxClaimEpoch = Math.max(this.#maxClaimEpoch, record.target.claimEpoch);
++				if (record.target.kind === "router-generation") this.#maxGeneration.set(record.target.roleInboxId,
++					Math.max(this.#maxGeneration.get(record.target.roleInboxId) ?? -1, record.target.generation));
++				this.#target = record.target; this.#closed = false; this.#completionGateClosed = false; this.#baseline = new Set(record.baselineJobIds);
++				this.#baselineSubagents = new Set(record.baselineSubagentIds); break;
++			}
++			case "admit": for (const input of record.inputs) {
++				this.#inputs.set(input.input.id, structuredClone(input)); this.#admissionSeq = Math.max(this.#admissionSeq, input.receipt.admissionSeq);
++				this.#humanSubmissions.delete(input.input.id);
++			} break;
++			case "humanSubmission": this.#humanSubmissions.set(record.id, { text: record.text, target: structuredClone(record.target) }); break;
++			case "humanSubmissionHandled": this.#humanSubmissions.delete(record.id); this.#orphanedHumanSubmissions.delete(record.id); break;
++			case "unadmittedResolved":
++				for (const id of record.entryIds) this.#unadmitted.delete(id);
++				for (const id of record.humanSubmissionIds) { this.#humanSubmissions.delete(id); this.#orphanedHumanSubmissions.delete(id); }
++				break;
++			case "humanRetained": for (const id of record.inputIds) { this.#retainedHuman.add(id); this.#preservedHuman.add(id); } break;
++			case "humanTaken": for (const id of record.inputIds) {
++				this.#retainedHuman.delete(id); this.#resumeRequested.delete(id);
++				const stored = this.#inputs.get(id);
++				if (stored) stored.receipt.turnId = record.turnId;
++			} break;
++			case "inputTaken": for (const id of record.inputIds) {
++				this.#continuingHistory.delete(id); this.#resumeRequested.delete(id);
++				const stored = this.#inputs.get(id);
++				if (stored) stored.receipt.turnId = record.turnId;
++			} break;
++			case "history": {
++				this.#pendingNotices.delete(record.inputId);
++				const stored = this.#inputs.get(record.inputId);
++				if (stored) {
++					if (!this.#historyTargets.has(record.inputId)) this.#historyTargets.set(record.inputId, stored.receipt.target);
++					Object.assign(stored.receipt, { historyEntryId: record.entryId, historyAt: record.at, turnId: record.turnId, sessionFile: realpathSync(this.manager.getSessionFile()!) });
++				}
++				break;
++			}
++			case "retarget": for (const id of record.inputIds) {
++				const stored = this.#inputs.get(id);
++				if (stored) {
++					const changed = targetKey(stored.receipt.target) !== targetKey(record.target);
++					if (record.reconciledHistory && stored.receipt.historyEntryId && !stored.receipt.turnCompletedAt &&
++						!stored.receipt.purgedAt && stored.wake !== false) {
++						this.#reconciledHistory.add(id);
++					} else if (changed) this.#reconciledHistory.delete(id);
++					if (changed) this.#continuingHistory.delete(id);
++					if (changed && !stored.receipt.turnCompletedAt) delete stored.receipt.turnId;
++					stored.receipt.target = record.target; delete stored.receipt.purgedAt;
++				}
++			} break;
++			case "purge": for (const id of record.inputIds) {
++				this.#pendingNotices.delete(id);
++				const stored = this.#inputs.get(id);
++				if (stored) stored.receipt.purgedAt = record.at;
++				this.#reconciledHistory.delete(id);
++				this.#continuingHistory.delete(id);
++			} break;
++			case "turnCompleted":
++				for (const id of record.inputIds) {
++					const stored = this.#inputs.get(id);
++					if (record.stopReason === "stop" && !record.willContinue) {
++						if (stored && stored.receipt.turnId === record.turnId) stored.receipt.turnCompletedAt = record.at;
++					} else if (this.#preservedHuman.has(id)) {
++						this.#retainedHuman.add(id); this.#resumeRequested.delete(id);
++					}
++				}
++				break;
++			case "gateClosed":
++				this.#closed = true; this.#retired.add(targetKey(record.target));
++				this.#continuingHistory.clear();
++				this.#turnActive = false; this.#turnPrestarted = false;
++				if (record.reason === "completed") {
++					this.#completionTargets.set(targetKey(record.target), record.target);
++					this.#completionGateClosed = true;
++				}
++				break;
++			case "quiesced": break;
++		}
++	}
++	getSessionActivity(): NativeSessionActivity {
++		const activity = this.host.activity?.() ?? {
++			runningJobs: this.host.jobs().length, runningProcesses: this.host.processes?.().length ?? 0,
++			runningSubagents: this.host.subagents?.().length ?? 0, pendingHumanAdmissions: 0, closing: false,
++		};
++		// Durable reservations may outlive the current native preprocessing scope.
++		return { ...activity, pendingHumanAdmissions: Math.max(activity.pendingHumanAdmissions, this.#humanSubmissions.size) };
++	}
++	getSessionControlReceipt(requestId: string): SessionControlReceipt | undefined {
++		this.#assertSession();
++		const receipt = this.#sessionControls.get(requestId);
++		return receipt && { ...structuredClone(receipt), ...this.#sessionControlHistory.get(requestId) };
++	}
++	/** A known pre-dispatch refusal is durable and inert until a new explicit control call retries it. */
++	deferSessionControlQueue(messages: readonly AgentMessage[], reason: string): void {
++		for (const message of messages) {
++			if (message.role !== "custom" || message.customType !== "lcp-session-continue" || !message.details ||
++				typeof message.details !== "object" || !("sessionControlRequestId" in message.details) ||
++				typeof message.details.sessionControlRequestId !== "string") continue;
++			const requestId = message.details.sessionControlRequestId;
++			this.#queuedSessionControls.delete(requestId);
++			if (this.manager.getSessionId() !== this.#sessionId || this.#sessionControlHistory.has(requestId) ||
++				this.#sessionControls.get(requestId)?.status !== "queued") continue;
++			this.#commit({ type: "sessionContinueState", requestId,
++				receipt: { status: "blocked", reason, observedAt: new Date().toISOString() } });
++		}
++	}
++	controlSession(request: SessionControlRequest): SessionControlReceipt {
++		this.#assertSession();
++		if (!request || (request.action !== "continue" && request.action !== "close") ||
++			typeof request.requestId !== "string" || !request.requestId.trim() || request.requestId.length > 256) throw new Error("INVALID_SESSION_CONTROL");
++		const blocked = (reason: string): SessionControlReceipt => ({ status: "blocked", reason, observedAt: new Date().toISOString() });
++		if (this.manager.getExecutorWriterState() !== "owned-by-receiver") return blocked("SESSION_WRITER_NOT_OWNED");
++		if (request.action === "close") {
++			if (this.#sessionControls.has(request.requestId)) return blocked("SESSION_CONTROL_CONFLICT");
++			if (!this.host.closeSession) return blocked("SESSION_CLOSE_HOST_UNAVAILABLE");
++			if (this.#humanSubmissions.size || [...this.#inputs.values()].some(input => !input.receipt.historyEntryId && !input.receipt.purgedAt) ||
++				[...this.#sessionControls].some(([id, receipt]) => receipt.status === "queued" && !this.#sessionControlHistory.has(id))) return blocked("SESSION_PENDING_INPUT");
++			const reason = this.host.closeSession();
++			return reason ? blocked(reason) : { status: "closing", observedAt: new Date().toISOString() };
++		}
++		// Historical binding is a durable fence too: an exact reopen cannot bypass business gates.
++		if (this.#lastBoundKey !== undefined) return blocked("SESSION_BOUND");
++		if (this.getSessionActivity().closing) return blocked("SESSION_CLOSING");
++		let receipt = this.#sessionControls.get(request.requestId);
++		if (!receipt) {
++			receipt = { status: "queued", observedAt: new Date().toISOString() };
++			this.#commit({ type: "sessionContinue", requestId: request.requestId, receipt });
++		} else if (receipt.status === "blocked") {
++			receipt = { status: "queued", observedAt: new Date().toISOString() };
++			this.#commit({ type: "sessionContinueState", requestId: request.requestId, receipt });
++		}
++		if (!this.#sessionControlHistory.has(request.requestId) && !this.#queuedSessionControls.has(request.requestId)) {
++			// Commit-before-queue is recoverable: retries reconstruct the same fixed native input.
++			this.host.queue({ role: "custom", customType: "lcp-session-continue", content: SESSION_CONTINUE_TEXT,
++				display: true, attribution: "agent", timestamp: Date.parse(receipt.observedAt),
++				details: { sessionControlRequestId: request.requestId, source: "router", authorization: "unchanged" } }, "followUp");
++			this.#queuedSessionControls.add(request.requestId);
++		}
++		return structuredClone(receipt);
++	}
++	assertTarget(target: ExecutorTarget, allowClosed = false): void {
++		this.#assertSession();
++		if (this.host.activity?.().closing) throw new Error("SESSION_CLOSING");
++		if (!this.#target || targetKey(target) !== targetKey(this.#target) || (!allowClosed && this.#closed)) {
++			throw new Error(target.kind === "executor" ? "STALE_ASSIGNMENT" : "STALE_ROUTER_GENERATION");
++		}
++	}
++	bindExecutorTarget(target: ExecutorTarget): { target: ExecutorTarget; instanceId: string; baselineJobIds: string[] } {
++		this.#assertSession();
++		if (this.host.activity?.().closing) throw new Error("SESSION_CLOSING");
++		if (!Number.isSafeInteger(target.claimEpoch) || target.claimEpoch < 0 ||
++			(target.kind === "executor" ? !target.ticketId || !target.assignmentId :
++				!Number.isSafeInteger(target.generation) || target.generation < 0 || !target.roleInboxId)) throw new Error("INVALID_EXECUTOR_TARGET");
++		// Monotonic fence: a superseded or stopped target and any lower claim/generation stay stale.
++		if (this.#retired.has(targetKey(target)) || target.claimEpoch < this.#maxClaimEpoch || (target.kind === "router-generation" &&
++			target.generation < (this.#maxGeneration.get(target.roleInboxId) ?? -1))) {
++			throw new Error(target.kind === "executor" ? "STALE_ASSIGNMENT" : "STALE_ROUTER_GENERATION");
++		}
++		// A replacement waits for the current target's confirmed quiescence, not just its closed gate.
++		if (this.#target && targetKey(target) !== targetKey(this.#target) && (!this.#closed || this.#stopFacts.has(targetKey(this.#target)))) {
++			throw new Error("EXECUTOR_TARGET_BUSY");
++		}
++		if (!this.#target || targetKey(target) !== targetKey(this.#target)) {
++			this.host.captureBaseline?.();
++			this.#commit({ type: "bind", target: structuredClone(target), baselineJobIds: this.host.jobs().map(job => job.id),
++				baselineSubagentIds: this.host.subagents?.().map(agent => agent.id) ?? [] });
++		} else if (this.#target.kind === "router-generation" && target.kind === "router-generation" && this.#target.prepared && !target.prepared) {
++			this.#commit({ type: "bind", target: structuredClone(target), baselineJobIds: [...this.#baseline], baselineSubagentIds: [...this.#baselineSubagents] });
++		}
++		if (this.#target?.kind === "router-generation" && !this.#target.prepared) {
++			for (const resolve of this.#routerActivationWaiters) resolve();
++		}
++		return { target: structuredClone(this.#target!), instanceId: this.instanceId, baselineJobIds: [...this.#baseline] };
++	}
++	/** A prepared handoff is local lifecycle waiting, not a failed model/provider attempt. */
++	async waitForRouterActivation(signal?: AbortSignal): Promise<void> {
++		const target = this.#target;
++		if (target?.kind !== "router-generation" || !target.prepared) return;
++		this.assertTarget(target);
++		signal?.throwIfAborted();
++		await new Promise<void>((resolve, reject) => {
++			const cleanup = () => { this.#routerActivationWaiters.delete(activate); signal?.removeEventListener("abort", abort); };
++			const activate = () => { cleanup(); resolve(); };
++			const abort = () => { cleanup(); reject(signal?.reason ?? new Error("Router activation aborted")); };
++			this.#routerActivationWaiters.add(activate);
++			signal?.addEventListener("abort", abort, { once: true });
++		});
++		this.assertTarget(target);
++		if (this.#target?.kind === "router-generation" && this.#target.prepared) throw new Error("STALE_ROUTER_GENERATION");
++	}
++	admitExecutorInputs(request: { target: ExecutorTarget; inputs: readonly ExecutorInput[]; delivery?: "followUp" | "steer"; wake?: false }): ExecutorInputReceipt[] {
++		this.assertTarget(request.target);
++		if (request.wake === false && (request.target.kind !== "router-generation" || request.inputs.some(input => input.kind !== "notice"))) {
++			throw new Error("EXECUTOR_SILENT_ADMISSION_FORBIDDEN");
++		}
++		if (request.inputs.length > 32 || Buffer.byteLength(JSON.stringify(request.inputs)) > 131072) throw new Error("EXECUTOR_INPUT_BATCH_TOO_LARGE");
++		const additions = new Map<string, StoredInput>();
++		for (const input of request.inputs) {
++			if (!input.id || !Number.isSafeInteger(input.createdSeq) || input.createdSeq < 0 || typeof input.text !== "string") throw new Error("INVALID_EXECUTOR_INPUT");
++			if (request.target.kind === "executor" && input.ticketId !== request.target.ticketId) throw new Error("STALE_ASSIGNMENT");
++			if (this.#target?.kind === "router-generation" && this.#target.prepared && input.kind !== "handoff") throw new Error("STALE_ROUTER_GENERATION");
++			const fingerprint = createHash("sha256").update(JSON.stringify([input.ticketId ?? null, input.kind, input.text, input.triggerId ?? null, input.answerToReportId ?? null, input.createdSeq])).digest("hex");
++			const existing = additions.get(input.id) ?? this.#inputs.get(input.id);
++			if (existing && existing.fingerprint !== fingerprint) throw new Error("INPUT_ID_CONFLICT");
++			if (existing && existing.wake !== request.wake) throw new Error("INPUT_WAKE_CONFLICT");
++			if (!existing) additions.set(input.id, { input: structuredClone(input), fingerprint, ...(request.wake === false ? { wake: false as const } : {}), receipt: { inputId: input.id,
++				target: structuredClone(request.target), admissionSeq: this.#admissionSeq + additions.size + 1, queuedAt: new Date().toISOString() } });
++		}
++		const ordered = [...additions.values()].sort((a, b) => a.input.createdSeq - b.input.createdSeq);
++		for (let index = 0; index < ordered.length; index++) ordered[index]!.receipt.admissionSeq = this.#admissionSeq + index + 1;
++		if (ordered.length) this.#commit({ type: "admit", inputs: ordered });
++		const retarget = request.inputs.filter(input => {
++			const stored = this.#inputs.get(input.id)!;
++			return stored.receipt.purgedAt || targetKey(stored.receipt.target) !== targetKey(request.target);
++		}).map(input => input.id);
++		if (retarget.length) this.#commit({ type: "retarget", inputIds: retarget, target: structuredClone(request.target) });
++		for (const input of [...request.inputs].sort((a, b) => a.createdSeq - b.createdSeq)) {
++			const stored = this.#inputs.get(input.id)!;
++			if (!stored.receipt.historyEntryId && !this.#queued.has(input.id)) this.#queue(stored, request.delivery ?? "followUp");
++		}
++		return request.inputs.map(input => structuredClone(this.#inputs.get(input.id)!.receipt));
++	}
++	#queue(stored: StoredInput, delivery: "followUp" | "steer"): void {
++		if (stored.wake === false) { this.#recordNoticeHistory(stored); return; }
++		if (this.#queued.has(stored.input.id)) return;
++		this.#queued.add(stored.input.id);
++		if (stored.human) {
++			this.host.queue({ role: "user", content: [{ type: "text", text: stored.input.text }], timestamp: Date.now(),
++				executorInputId: stored.input.id } as AgentMessage, delivery);
++			return;
++		}
++		this.host.queue({ role: "custom", customType: "lcp-ticket-input", content: stored.input.text, display: true,
++			attribution: "agent", timestamp: Date.now(), details: { executorInputId: stored.input.id } }, delivery);
++	}
++	/**
++	 * A running loop works on its own context copy: a history entry written mid-run (while streaming,
++	 * between a toolCall and its toolResult, or before an auto-continue) would sit where no request
++	 * sent it. Defer to the next idle boundary; the admission record already makes the notice durable.
++	 */
++	#recordNoticeHistory(stored: StoredInput): void {
++		if (stored.receipt.historyEntryId) return;
++		this.#pendingNotices.add(stored.input.id);
++		this.flushSilentNotices();
++	}
++	/** Write every deferred silent notice, oldest admission first, if the host reports an idle boundary. */
++	flushSilentNotices(): void {
++		if (!this.#pendingNotices.size || this.#flushingNotices || this.manager.getSessionId() !== this.#sessionId) return;
++		if (!(this.host.noticeBoundary ? this.host.noticeBoundary() : !this.host.turnRunning?.())) return;
++		this.#flushingNotices = true;
++		try {
++			const due = [...this.#pendingNotices].map(id => this.#inputs.get(id)!).sort((a, b) => a.receipt.admissionSeq - b.receipt.admissionSeq);
++			for (const stored of due) this.#writeNoticeHistory(stored);
++		} finally { this.#flushingNotices = false; }
++	}
++	/** Only a durable silent notice in a live Router binding may authorize the idle wake-tail repair. */
++	isRouterSilentNotice(message: AgentMessage | undefined): boolean {
++		if (message?.role !== "custom" || this.#target?.kind !== "router-generation" || this.#closed) return false;
++		const id = executorInputId(message);
++		const stored = id ? this.#inputs.get(id) : undefined;
++		return stored?.wake === false && stored.receipt.historyEntryId !== undefined && !stored.receipt.purgedAt &&
++			targetKey(stored.receipt.target) === targetKey(this.#target);
++	}
++	#writeNoticeHistory(stored: StoredInput): void {
++		if (stored.receipt.historyEntryId) { this.#pendingNotices.delete(stored.input.id); return; }
++		const message = { role: "custom", customType: "lcp-ticket-input", content: stored.input.text, display: true,
++			attribution: "agent", timestamp: Date.parse(stored.receipt.queuedAt), details: { executorInputId: stored.input.id } } as const;
++		const entryId = this.host.appendNoticeHistory?.(message) ?? this.manager.appendCustomMessageEntry(
++			message.customType, message.content, message.display, message.details, message.attribution, message.timestamp);
++		this.#commit({ type: "history", inputId: stored.input.id, entryId, at: new Date().toISOString() });
++		this.host.publishHistory?.(message);
++	}
++	/** Reserve the original native submit before asynchronous command/input hooks. */
++	beginInteractiveSubmission(text: string): string | undefined {
++		const target = this.#target ?? (this.#completionGateClosed ? [...this.#completionTargets.values()].at(-1) : undefined);
++		if (!target || (this.#closed && !this.#completionTargets.has(targetKey(target)))) return undefined;
++		const id = randomUUID();
++		this.#commit({ type: "humanSubmission", id, text, target: structuredClone(target) });
++		return id;
++	}
++	finishInteractiveSubmission(id: string): void {
++		if (this.#humanSubmissions.has(id)) this.#commit({ type: "humanSubmissionHandled", id });
++	}
++
++	/** Called only at the native interactive submission boundary, before any await. */
++	admitInteractiveInput(text: string, reservationId?: string): string | undefined {
++		const reservation = reservationId ? this.#humanSubmissions.get(reservationId) : undefined;
++		const target = reservation?.target ?? this.#target;
++		const retain = target !== undefined && this.#completionTargets.has(targetKey(target)) &&
++			(!this.#target || this.#closed || targetKey(target) !== targetKey(this.#target));
++		if (!target || (this.#closed && !retain)) {
++			if (reservationId) throw new Error("STALE_ASSIGNMENT");
++			return undefined;
++		}
++		const id = reservationId ?? randomUUID();
++		if (reservationId) {
++			const reservation = this.#humanSubmissions.get(reservationId);
++			if (!reservation) {
++				const previous = this.#inputs.get(reservationId);
++				if (previous?.human && this.#retainedHuman.has(reservationId)) return reservationId;
++				if (previous?.human) { this.assertInteractiveInput(reservationId); return reservationId; }
++				throw new Error("STALE_ASSIGNMENT");
++			}
++			if (!retain) this.assertTarget(reservation.target);
++			text = reservation.text;
++		}
++		const input = { id, ...(target.kind === "executor" ? { ticketId: target.ticketId } : {}), kind: "followup", text, createdSeq: this.#admissionSeq + 1 };
++		this.#commit({ type: "admit", inputs: [{ input, human: true, fingerprint: id,
++			receipt: { inputId: id, target: structuredClone(target), admissionSeq: this.#admissionSeq + 1, queuedAt: new Date().toISOString() } }] });
++		if (retain) this.#retainHumanHistory(this.#inputs.get(id)!);
++		return id;
++	}
++	/** Persist the original, proven native submission without waking a model or inventing an entry ID. */
++	#retainHumanHistory(stored: StoredInput): void {
++		if (!stored.human) throw new Error("EXECUTOR_NOT_NATIVE_HUMAN");
++		if (!this.#retainedHuman.has(stored.input.id)) this.#commit({ type: "humanRetained", inputIds: [stored.input.id] });
++		this.#queued.delete(stored.input.id);
++		if (stored.receipt.historyEntryId) return;
++		const message = { role: "user", content: [{ type: "text", text: stored.input.text }],
++			executorInputId: stored.input.id, timestamp: Date.parse(stored.receipt.queuedAt) } as AgentMessage;
++		const entryId = this.host.appendHumanHistory?.(message) ?? this.manager.appendMessage(message);
++		this.#commit({ type: "history", inputId: stored.input.id, entryId, at: new Date().toISOString() });
++		this.host.publishHistory?.(message);
++	}
++	isRetainedHumanInput(id: string): boolean { return this.#preservedHuman.has(id); }
++	get hasCompletionHold(): boolean {
++		if (this.#completionGateClosed) return true;
++		for (const id of this.#retainedHuman) if (!this.#resumeRequested.has(id)) return true;
++		return false;
++	}
++	cancelPendingHumanResumes(): void { this.#resumeRequested.clear(); }
++
++	assertInput(id: string): void {
++		const input = this.#inputs.get(id);
++		if (!input || input.receipt.purgedAt) throw new Error("STALE_ASSIGNMENT");
++		this.assertTarget(input.receipt.target);
++	}
++	assertInteractiveInput(id: string): void {
++		this.assertInput(id);
++		if (!this.#inputs.get(id)?.human) throw new Error("STALE_ASSIGNMENT");
++	}
++
++	/** Enroll only this target's unfinished history when a fresh, proven native interactive input dispatches. */
++	enrollSameTargetHistoryForInteractiveInput(inputId: string): void {
++		this.assertInteractiveInput(inputId);
++		const control = this.#inputs.get(inputId)!;
++		if (control.receipt.historyEntryId) return;
++		const key = targetKey(control.receipt.target), selected: string[] = [];
++		for (const [id, stored] of this.#inputs) {
++			if (id === inputId || this.#preservedHuman.has(id) || !stored.receipt.historyEntryId ||
++				stored.receipt.turnCompletedAt || stored.receipt.purgedAt || stored.wake === false ||
++				targetKey(stored.receipt.target) !== key) continue;
++			const origin = this.#historyTargets.get(id);
++			if ((origin && targetKey(origin) === key) || this.#reconciledHistory.has(id)) selected.push(id);
++		}
++		if (selected.length) this.reconcileExecutorInputs({ target: control.receipt.target, inputIds: selected });
++	}
++	/** Enroll only this target's unfinished history after a fresh, proven native continue shortcut. */
++	prepareInteractiveResume(inputId: string): void {
++		this.assertInteractiveInput(inputId);
++		const control = this.#inputs.get(inputId)!;
++		const text = control.input.text.trim();
++		if ((text !== "." && text !== "c") || control.receipt.historyEntryId) throw new Error("EXECUTOR_INPUT_NOT_ADMITTED");
++		this.enrollSameTargetHistoryForInteractiveInput(inputId);
++	}
++	ensureTurnStarted(): void {
++		if (this.#turnActive) return;
++		this.#turnId = randomUUID();
++		this.#turnActive = true;
++		this.#turnPrestarted = true;
++	}
++	enteredHistory(message: AgentMessage, entryId: string): void {
++		if (message.role === "custom" && message.customType === "lcp-session-continue" && message.details &&
++			typeof message.details === "object" && "sessionControlRequestId" in message.details &&
++			typeof message.details.sessionControlRequestId === "string") this.#sessionControlHistory.set(message.details.sessionControlRequestId,
++				{ historyEntryId: entryId, historyAt: new Date().toISOString() });
++		const id = executorInputId(message);
++		if (!id) {
++			if (this.#target && !this.#closed && this.#isUnadmittedUser(message)) this.#unadmitted.set(entryId, this.#target);
++			return;
++		}
++		if (!this.#inputs.has(id)) { if (this.#target) this.#unadmitted.set(entryId, this.#target); return; }
++		this.ensureTurnStarted();
++		this.#commit({ type: "history", inputId: id, entryId, at: new Date().toISOString(), turnId: this.#turnId });
++	}
++	beginTurn(): void {
++		if (this.#turnPrestarted) {
++			this.#turnPrestarted = false;
++			return;
++		}
++		if (this.#turnActive) this.turnCompleted("aborted", true);
++		this.#turnId = randomUUID();
++		this.#turnActive = true;
++	}
++	/** Called with the native loop's actual model context, not the mutable session transcript. */
++	observeModelInputs(messages: readonly AgentMessage[]): void {
++		this.#assertSession();
++		if (!this.#turnId || !this.#target || this.#closed ||
++			(!this.#preservedHuman.size && !this.#reconciledHistory.size && !this.#continuingHistory.size)) return;
++		const key = targetKey(this.#target), eligible = new Set<string>();
++		for (const ids of [this.#preservedHuman, this.#reconciledHistory, this.#continuingHistory]) for (const id of ids) {
++			const stored = this.#inputs.get(id);
++			if (stored && !stored.receipt.turnCompletedAt && !stored.receipt.purgedAt && stored.wake !== false &&
++				stored.receipt.historyEntryId && stored.receipt.turnId !== this.#turnId &&
++				targetKey(stored.receipt.target) === key && (this.#resumeRequested.has(id) || !this.#retainedHuman.has(id))) eligible.add(id);
++		}
++		if (!eligible.size) return;
++		const humanTaken: string[] = [], inputTaken: string[] = [];
++		for (const message of messages) {
++			const id = executorInputId(message);
++			if (id && eligible.delete(id)) (this.#preservedHuman.has(id) ? humanTaken : inputTaken).push(id);
++		}
++		if (humanTaken.length) this.#commit({ type: "humanTaken", inputIds: humanTaken, turnId: this.#turnId });
++		if (inputTaken.length) this.#commit({ type: "inputTaken", inputIds: inputTaken, turnId: this.#turnId });
++	}
++	turnCompleted(stopReason: string, willContinue: boolean): void {
++		if (!this.#target || !this.#turnId) {
++			this.#turnActive = false;
++			this.#turnPrestarted = false;
++			return;
++		}
++		const consumed = [...this.#inputs.values()].filter(input => this.#target &&
++			targetKey(input.receipt.target) === targetKey(this.#target) && input.receipt.historyEntryId && !input.receipt.turnCompletedAt &&
++			input.wake !== false && !input.receipt.purgedAt && !this.#retainedHuman.has(input.input.id) &&
++			input.receipt.turnId === this.#turnId).map(input => input.input.id);
++		this.#commit({ type: "turnCompleted", turnId: this.#turnId, inputIds: consumed, stopReason, willContinue,
++			at: new Date().toISOString(), runningJobs: this.host.jobs().length });
++		// Carry non-preserved history across same-process continuations (including steering interrupts with willContinue).
++		if (willContinue) {
++			for (const id of consumed) if (!this.#preservedHuman.has(id)) this.#continuingHistory.add(id);
++		} else this.#continuingHistory.clear();
++		this.#turnActive = false;
++		this.#turnPrestarted = false;
++	}
++	getExecutorTurnContext(options: { requireFresh?: boolean } = {}): ExecutorTurnContext {
++		this.#assertSession();
++		const inputs = [...this.#inputs.values()].filter(input => input.wake !== false && this.#target && targetKey(input.receipt.target) === targetKey(this.#target));
++		const consumed = inputs.filter(input => input.receipt.historyEntryId && !input.receipt.purgedAt &&
++			!this.#retainedHuman.has(input.input.id) && this.#turnId !== undefined && input.receipt.turnId === this.#turnId);
++		const sameTarget = (target: ExecutorTarget) => this.#target && targetKey(target) === targetKey(this.#target);
++		if (options.requireFresh && ([...this.#humanSubmissions.values()].some(item => sameTarget(item.target)) ||
++			[...this.#unadmitted.values()].some(sameTarget) || inputs.some(input => !input.receipt.historyEntryId ||
++				input.receipt.purgedAt || this.#retainedHuman.has(input.input.id) ||
++				(!input.receipt.turnCompletedAt && (!this.#turnId || input.receipt.turnId !== this.#turnId))))) throw new Error("STALE_READY");
++		return { target: this.#target && structuredClone(this.#target), turnId: this.#turnId, admissionSeq: this.#admissionSeq,
++			inputWatermark: inputs.reduce((seq, input) => input.receipt.historyEntryId && !input.receipt.purgedAt &&
++				!this.#retainedHuman.has(input.input.id) && (input.receipt.turnCompletedAt ||
++					(this.#turnId !== undefined && input.receipt.turnId === this.#turnId)) ? Math.max(seq, input.receipt.admissionSeq) : seq, 0),
++			consumedInputIds: consumed.map(input => input.input.id), unadmittedUserEntryIds: [...this.#unadmitted.keys()],
++			pendingHumanSubmissionIds: [...this.#humanSubmissions.keys()],
++			orphanedHumanSubmissions: [...this.#humanSubmissions].flatMap(([id, submission]) =>
++				this.#orphanedHumanSubmissions.has(id) ? [{ id, ...structuredClone(submission) }] : []) };
++	}
++	reconcileExecutorInputs(request: { target: ExecutorTarget; previousTarget?: ExecutorTarget; inputIds: readonly string[];
++		resolveUnadmitted?: { entryIds?: readonly string[]; humanSubmissionIds?: readonly string[] } }): ExecutorInputReceipt[] {
++		this.assertTarget(request.target, true);
++		const selected = request.inputIds.map(id => this.#inputs.get(id)).filter((input): input is StoredInput => input !== undefined);
++		const sessionFile = selected.some(input => input.receipt.historyEntryId) ? realpathSync(this.manager.getSessionFile()!) : undefined;
++		for (const input of selected) {
++			if (targetKey(input.receipt.target) !== targetKey(request.target) && (!request.previousTarget || targetKey(input.receipt.target) !== targetKey(request.previousTarget))) throw new Error("EXECUTOR_INPUT_TARGET_MISMATCH");
++			const from = input.receipt.target, to = request.target;
++			const retainedHuman = input.human === true && this.#retainedHuman.has(input.input.id);
++			if (!retainedHuman && (from.kind !== to.kind ||
++				(from.kind === "executor" && to.kind === "executor" && (from.ticketId !== to.ticketId || input.input.ticketId !== to.ticketId)) ||
++				(from.kind === "router-generation" && to.kind === "router-generation" && from.roleInboxId !== to.roleInboxId))) {
++				throw new Error("EXECUTOR_INPUT_TARGET_MISMATCH");
++			}
++			if (input.receipt.historyEntryId && input.receipt.sessionFile !== sessionFile) throw new Error("EXECUTOR_INPUT_TARGET_MISMATCH");
++		}
++		const entryIds = [...new Set(request.resolveUnadmitted?.entryIds ?? [])];
++		const humanSubmissionIds = [...new Set(request.resolveUnadmitted?.humanSubmissionIds ?? [])];
++		if (entryIds.some(id => !this.#unadmitted.has(id)) || humanSubmissionIds.some(id => !this.#orphanedHumanSubmissions.has(id))) {
++			throw new Error("EXECUTOR_UNADMITTED_UNKNOWN");
++		}
++		if (entryIds.length || humanSubmissionIds.length) this.#commit({ type: "unadmittedResolved", entryIds, humanSubmissionIds });
++		const retargeted = selected.filter(input => !input.receipt.purgedAt && !input.receipt.turnCompletedAt && input.wake !== false &&
++			((input.receipt.historyEntryId && (!this.#reconciledHistory.has(input.input.id) ||
++				targetKey(input.receipt.target) !== targetKey(request.target))) ||
++				(this.#retainedHuman.has(input.input.id) && targetKey(input.receipt.target) !== targetKey(request.target)))).map(input => input.input.id);
++		if (retargeted.length) this.#commit({ type: "retarget", inputIds: retargeted, target: structuredClone(request.target), reconciledHistory: true });
++		const pending = selected.filter(input => !input.receipt.historyEntryId).map(input => input.input.id);
++		if (pending.length) {
++			this.#commit({ type: "purge", inputIds: pending, at: new Date().toISOString() });
++			for (const id of pending) this.#queued.delete(id);
++			this.host.purge(new Set(pending));
++		}
++		return selected.map(input => structuredClone(input.receipt));
++	}
++	/** Replay is explicit after bind/reconciliation; standby never wakes durable pending work. */
++	resumeExecutorInputs(request: { target: ExecutorTarget; inputIds: readonly string[] }): void {
++		this.assertTarget(request.target);
++		const isResumableHuman = (id: string): boolean => {
++			const stored = this.#inputs.get(id);
++			return Boolean(stored && !stored.receipt.turnCompletedAt && !stored.receipt.purgedAt &&
++				(this.#preservedHuman.has(id) || (stored.human === true && this.#reconciledHistory.has(id))));
++		};
++		const resumable = request.inputIds.filter(isResumableHuman);
++		for (const id of resumable) this.assertInput(id);
++		// A running loop already captured its context; an existing request/taken ID is only an idempotent retry.
++		if (resumable.length && this.host.turnRunning?.()) {
++			if (resumable.every(id => this.#resumeRequested.has(id) ||
++				(!this.#retainedHuman.has(id) && this.#inputs.get(id)?.receipt.turnId === this.#turnId))) return;
++			throw new Error("EXECUTOR_RESUME_BUSY");
++		}
++		const wake: string[] = [];
++		for (const id of request.inputIds) {
++			const stored = this.#inputs.get(id);
++			if (stored && isResumableHuman(id) && stored.receipt.historyEntryId) {
++				this.assertInput(id);
++				if (!this.#resumeRequested.has(id)) { wake.push(id); this.#resumeRequested.add(id); }
++			}
++			if (stored && !stored.receipt.historyEntryId) this.#queue(stored, "followUp");
++		}
++		if (wake.length) {
++			// Scheduling is not consumption; retain the durable fence until observeModelInputs sees this ID.
++			const recoveryInputIds = [...this.#inputs.values()].filter(input => input.input.kind === "recovery" &&
++				targetKey(input.receipt.target) === targetKey(request.target) && !input.receipt.historyEntryId &&
++				!input.receipt.purgedAt && this.#queued.has(input.input.id)).map(input => input.input.id);
++			this.host.resume?.(recoveryInputIds);
++		}
++	}
++	getExecutorInputReceipts(inputIds: readonly string[]): ExecutorInputReceipt[] {
++		this.#assertSession();
++		return inputIds.flatMap(id => { const input = this.#inputs.get(id); return input ? [structuredClone(input.receipt)] : []; });
++	}
++	/**
++	 * Close admission, then join the turn, owned jobs/subagents and every live native process. The join
++	 * keeps running past `timeoutMs`; until it ends this rejects `STOP_UNCONFIRMED` and nothing records
++	 * quiescence. A retry rejoins the same stop.
++	 */
++	stopExecutorAssignment(request: { target: ExecutorTarget; timeoutMs?: number; reason?: ExecutorStopReason; throughAdmissionSeq?: number }): Promise<ExecutorStopReceipt> {
++		this.assertTarget(request.target, true);
++		const timeoutMs = request.timeoutMs ?? STOP_JOIN_TIMEOUT_MS;
++		if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) throw new Error("INVALID_STOP_TIMEOUT");
++		if (request.throughAdmissionSeq !== undefined && (!Number.isSafeInteger(request.throughAdmissionSeq) || request.throughAdmissionSeq < 0 ||
++			request.throughAdmissionSeq > this.#admissionSeq)) throw new Error("INVALID_COMPLETION_WATERMARK");
++		const key = targetKey(request.target);
++		let stopping = this.#stops.get(key);
++		if (!stopping) {
++			stopping = this.#joinStop(request.target, key, request.reason ?? "human-stop", request.throughAdmissionSeq);
++			this.#stops.set(key, stopping);
++			// A failed join leaves the gate closed; the next stop request joins again.
++			stopping.catch(() => { if (this.#stops.get(key) === stopping) this.#stops.delete(key); });
++		}
++		const joined = stopping;
++		return new Promise((resolve, reject) => {
++			const timer = setTimeout(() => reject(new Error("STOP_UNCONFIRMED")), timeoutMs);
++			joined.then(receipt => { clearTimeout(timer); resolve(receipt); },
++				error => { clearTimeout(timer); reject(new Error("STOP_UNCONFIRMED", { cause: error })); });
++		});
++	}
++	#joinStop(target: ExecutorTarget, key: string, reason: ExecutorStopReason, throughAdmissionSeq?: number): Promise<ExecutorStopReceipt> {
++		let facts = this.#stopFacts.get(key);
++		if (!facts) {
++			const at = new Date().toISOString();
++			const turnAborted = this.host.turnRunning?.() ?? false;
++			this.#commit({ type: "gateClosed", target, at, reason, throughAdmissionSeq });
++			facts = { gateClosedAt: at, turnAborted, purgedInputIds: [] };
++			this.#stopFacts.set(key, facts);
++		}
++		this.host.cancelModelRequests();
++		const retained = reason === "completed" ? [...this.#inputs.values()].filter(input => input.human &&
++			targetKey(input.receipt.target) === key && !input.receipt.turnCompletedAt && !input.receipt.purgedAt) : [];
++		for (const input of retained) if (!this.#retainedHuman.has(input.input.id)) this.#commit({ type: "humanRetained", inputIds: [input.input.id] });
++		// A deferred silent notice is a history-only fact, not model work: it still flushes once idle.
++		const purgedInputIds = [...this.#inputs.values()].filter(input => targetKey(input.receipt.target) === key && input.wake !== false &&
++			!input.receipt.historyEntryId && !input.receipt.purgedAt && !this.#retainedHuman.has(input.input.id)).map(input => input.input.id);
++		if (purgedInputIds.length) this.#commit({ type: "purge", inputIds: purgedInputIds, at: new Date().toISOString() });
++		for (const id of purgedInputIds) this.#queued.delete(id);
++		this.host.purge(new Set([...purgedInputIds, ...retained.map(input => input.input.id)]));
++		for (const input of retained) this.#queued.delete(input.input.id);
++		facts.purgedInputIds.push(...purgedInputIds);
++		const { gateClosedAt, turnAborted } = facts;
++		// Snapshot before the first await. Work started by the person after gate close is unrelated.
++		const children = this.host.subagents?.() ?? [];
++		const protectedIds = new Set(this.#baselineSubagents);
++		for (;;) {
++			const size = protectedIds.size;
++			for (const child of children) if (child.parentId && protectedIds.has(child.parentId)) protectedIds.add(child.id);
++			if (protectedIds.size === size) break;
++		}
++		const processes = (this.host.processes?.() ?? []).filter(run =>
++			(!run.jobId || !this.#baseline.has(run.jobId)) && (!run.ownerId || !protectedIds.has(run.ownerId)));
++		const jobs = this.host.jobs().filter(job => !this.#baseline.has(job.id) && (!job.ownerId || !protectedIds.has(job.ownerId)));
++		return (async () => {
++			const jobsEnded: string[] = [], subagentsEnded: string[] = [];
++			await this.host.abort();
++			for (const input of retained) this.#retainHumanHistory(input);
++			for (const job of jobs) { job.cancel(); jobsEnded.push(job.id); if (job.agentId) subagentsEnded.push(job.agentId); }
++			await Promise.all(jobs.map(job => job.join));
++			for (const child of children) {
++				if (protectedIds.has(child.id)) continue;
++				await child.stop();
++				if (!subagentsEnded.includes(child.id)) subagentsEnded.push(child.id);
++			}
++			// An aborted tool or cancelled job settles before its process is reaped: join the process itself.
++			await Promise.all(processes.map(run => run.exited));
++			// A switched-out journal has no writer lease. Keep the same stop pending until it returns.
++			if (this.manager.getSessionId() !== this.#sessionId) {
++				const activation = Promise.withResolvers<void>();
++				this.#activationWaiters.push(activation.resolve);
++				await activation.promise;
++			}
++			const receipt = { target: structuredClone(target), ...(target.kind === "executor" ? { assignmentId: target.assignmentId } : {}),
++				instanceId: this.instanceId, gateClosedAt, turnAborted, purgedInputIds: [...facts.purgedInputIds], jobsEnded, subagentsEnded,
++				reason, throughAdmissionSeq, retainedHumanInputIds: retained.map(input => input.input.id),
++				pendingHumanSubmissionIds: [...this.#humanSubmissions].filter(([, submission]) => targetKey(submission.target) === key).map(([id]) => id),
++				quiescedAt: new Date().toISOString() };
++			this.#commit({ type: "quiesced", receipt });
++			this.#stopFacts.delete(key);
++			return receipt;
++		})();
++	}
++	appendSourceEvent(event: NativeSourceEvent): NativeSourceEvent {
++		return this.#sourceEvents.appendSourceEvent(event);
++	}
++	getSourceEvents(request: { afterSeq: number; limit?: number; maxBytes?: number }) {
++		return this.#sourceEvents.getSourceEvents(request);
++	}
++
++	getExecutorWriterState(): "owned-by-receiver" | "held" | "free" | "unknown" {
++		this.#assertSession();
++		return this.manager.getExecutorWriterState();
++	}
++	getExecutorCapabilities(): typeof EXECUTOR_CAPABILITIES { return EXECUTOR_CAPABILITIES; }
++	getExecutorEvents(request: { afterSeq: number; limit?: number; maxBytes?: number }): { sourceId: string; events: ExecutorSourceEvent[]; nextSeq: number; latestSeq: number; hasMore: boolean } {
++		const { afterSeq, limit = 128, maxBytes = 262144 } = request;
++		if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isInteger(limit) || limit < 1 || limit > 128 || maxBytes < 8192 || maxBytes > 262144) throw new Error("INVALID_SOURCE_CURSOR");
++		if (afterSeq > this.#events.length) throw new Error("SOURCE_CURSOR_AHEAD");
++		const result = { sourceId: this.#sessionId, events: [] as ExecutorSourceEvent[], nextSeq: afterSeq, latestSeq: this.#events.length, hasMore: afterSeq < this.#events.length };
++		for (const event of this.#events.slice(afterSeq, afterSeq + limit)) {
++			result.events.push(event); const previous = result.nextSeq; result.nextSeq = event.seq; result.hasMore = event.seq < this.#events.length;
++			if (Buffer.byteLength(JSON.stringify(result)) > maxBytes) { result.events.pop(); result.nextSeq = previous; result.hasMore = true; if (!result.events.length) throw new Error("SOURCE_EVENT_PAGE_TOO_SMALL"); break; }
++		}
++		return structuredClone(result);
++	}
++	get executorBound(): boolean { return this.#target?.kind === "executor" && !this.#closed; }
++	get hasBoundTarget(): boolean { return this.#target !== undefined && !this.#closed; }
++}
+diff --git a/src/session/executor-source-events.ts b/src/session/executor-source-events.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8164e514a5ef0af3c1c997b0ff8d3e6083ab5e89
+--- /dev/null
++++ b/src/session/executor-source-events.ts
+@@ -0,0 +1,74 @@
++import { realpathSync } from "node:fs";
++import { basename, dirname, join } from "node:path";
++import type { SessionManager } from "./session-manager";
++import type { SessionEntry } from "./session-entries";
++
++/** Native Source DTO; business project association remains an Engine-owned fact. */
++export interface NativeSourceEvent {
++	version: 1; id: string; seq: number;
++	kind: "started" | "busy" | "turn-ended" | "idle" | "exited" | "project-changed" | "title-changed";
++	at: string;
++	native: { sessionId: string; sessionFile: string; cwd: string; hostInstanceId: string };
++	loopId?: string; turnIndex?: number; nativeEntryId?: string;
++	activity?: { state: "busy" | "idle" | "stopped" | "switched"; pendingMessages: boolean | null;
++		runningJobs: number | null; willContinue?: boolean; awaitingAsyncWork?: boolean };
++	project?: { projectIds: string[]; primaryProjectId?: string; state: "associated" | "unassigned" | "conflict" | "non-project";
++		origin: "automatic" | "explicit" | "inherited" | "correction"; reason?: string };
++	title?: string; exitReason?: "shutdown" | "switched";
++}
++export interface NativeSourcePage {
++	sourceId: string; events: NativeSourceEvent[]; nextSeq: number; latestSeq: number; hasMore: boolean;
++}
++
++/** Populated by the trusted Source producer, independently of executor/Router target binding. */
++export class ExecutorSourceEvents {
++	#events: NativeSourceEvent[] = [];
++	#byId = new Map<string, NativeSourceEvent>();
++	readonly #sessionId: string;
++	constructor(private readonly manager: SessionManager, entries: readonly SessionEntry[] = manager.getEntries()) {
++		this.#sessionId = manager.getSessionId();
++		for (const entry of entries) {
++			if (entry.type !== "custom" || entry.customType !== "lcp-source-event") continue;
++			const event = entry.data as NativeSourceEvent;
++			if (event.seq !== this.#events.length + 1) throw new Error("SOURCE_EVENT_GAP");
++			this.#events.push(event); this.#byId.set(event.id, event);
++		}
++	}
++	appendSourceEvent(event: NativeSourceEvent): NativeSourceEvent {
++		if (this.manager.getSessionId() !== this.#sessionId) throw new Error("EXECUTOR_SESSION_SWITCHED");
++		const previous = this.#byId.get(event.id);
++		if (previous) {
++			if (JSON.stringify(previous) !== JSON.stringify(event)) throw new Error("SOURCE_EVENT_ID_CONFLICT");
++			return structuredClone(previous);
++		}
++		if (event.version !== 1 || !event.id || !Number.isSafeInteger(event.seq) || event.seq !== this.#events.length + 1 ||
++			event.native.sessionId !== this.#sessionId || event.native.sessionFile !==
++				join(realpathSync(dirname(this.manager.getSessionFile()!)), basename(this.manager.getSessionFile()!)) ||
++			Buffer.byteLength(JSON.stringify(event)) > 8192) throw new Error("INVALID_SOURCE_EVENT");
++		// Source is metadata, never a business Input or an implicit target bind.
++		const snapshot = structuredClone(event);
++		this.manager.appendExecutorRecord("lcp-source-event", snapshot);
++		this.#events.push(snapshot); this.#byId.set(event.id, snapshot);
++		return structuredClone(snapshot);
++	}
++	getSourceEvents(request: { afterSeq: number; limit?: number; maxBytes?: number }): NativeSourcePage {
++		if (this.manager.getSessionId() !== this.#sessionId) throw new Error("EXECUTOR_SESSION_SWITCHED");
++		const { afterSeq, limit = 128, maxBytes = 262144 } = request;
++		if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isInteger(limit) || limit < 1 || limit > 128 ||
++			!Number.isInteger(maxBytes) || maxBytes < 8192 || maxBytes > 262144) throw new Error("INVALID_SOURCE_CURSOR");
++		if (afterSeq > this.#events.length) throw new Error("SOURCE_CURSOR_AHEAD");
++		const result: NativeSourcePage = { sourceId: this.#sessionId, events: [], nextSeq: afterSeq,
++			latestSeq: this.#events.length, hasMore: afterSeq < this.#events.length };
++		for (let index = afterSeq; index < Math.min(afterSeq + limit, this.#events.length); index++) {
++			const event = this.#events[index]!;
++			if (event.seq !== result.nextSeq + 1) throw new Error("SOURCE_EVENT_GAP");
++			result.events.push(event); const previous = result.nextSeq; result.nextSeq = event.seq; result.hasMore = event.seq < result.latestSeq;
++			if (Buffer.byteLength(JSON.stringify(result)) > maxBytes) {
++				result.events.pop(); result.nextSeq = previous; result.hasMore = true;
++				if (!result.events.length) throw new Error("SOURCE_EVENT_PAGE_TOO_SMALL");
++				break;
++			}
++		}
++		return structuredClone(result);
++	}
++}
+diff --git a/src/session/session-maintenance.ts b/src/session/session-maintenance.ts
+index b439f445629ac30b33d31ec2197cafb4f67dbe1d..957cac5d5d8a61fca00281c575be472e9ffa6ea0 100644
+--- a/src/session/session-maintenance.ts
++++ b/src/session/session-maintenance.ts
+@@ -521,6 +521,8 @@ export interface SessionMaintenanceHost {
+ 	disconnectFromAgent(): void;
+ 	reconnectToAgent(): void;
+ 	drainStrandedQueuedMessages(): void;
++	/** Recheck the host's existing notice boundary after maintenance clears its busy state. */
++	flushSilentNotices(): void;
+ 	/** The stored context as `model` reads it (the active model when omitted). */
+ 	buildDisplaySessionContext(model?: Model): SessionContext;
+ 	/** Adopt a {@link buildDisplaySessionContext} result as the live history, persisting any snapshot it appended. */
+@@ -1860,6 +1862,7 @@ export class SessionMaintenance {
+ 					}
+ 				}
+ 			}
++			this.#host.flushSilentNotices();
+ 		}
+ 	}
+ 
+@@ -2188,6 +2191,7 @@ export class SessionMaintenance {
+ 			if (this.#autoCompactionAbortController === controller) {
+ 				this.#autoCompactionAbortController = undefined;
+ 			}
++			this.#host.flushSilentNotices();
+ 		}
+ 	}
+ 
+@@ -2340,6 +2344,7 @@ export class SessionMaintenance {
+ 		} finally {
+ 			this.#idleCompactionCleanup = undefined;
+ 			cleanup.resolve();
++			this.#host.flushSilentNotices();
+ 		}
+ 	}
+ 
+@@ -2392,6 +2397,7 @@ export class SessionMaintenance {
+ 			this.#readyCompaction?.fail(error);
+ 		} finally {
+ 			this.#watchingForIdleCompaction = false;
++			this.#host.flushSilentNotices();
+ 		}
+ 	}
+ 
+@@ -6563,6 +6569,7 @@ export class SessionMaintenance {
+ 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
+ 				this.#autoCompactionAbortController = undefined;
+ 			}
++			this.#host.flushSilentNotices();
+ 		}
+ 		return COMPACTION_CHECK_NONE;
+ 	}
+@@ -6952,6 +6959,7 @@ export class SessionMaintenance {
+ 			if (this.#autoCompactionAbortController === controller) {
+ 				this.#autoCompactionAbortController = undefined;
+ 			}
++			this.#host.flushSilentNotices();
+ 		}
+ 	}
+ 
+diff --git a/src/session/session-manager.ts b/src/session/session-manager.ts
+index 99fff7e98bf04381ef01c152aca3457b7f33cddb..912c738297531ea0d3a0c2deeb18326d1e5100e5 100644
+--- a/src/session/session-manager.ts
++++ b/src/session/session-manager.ts
+@@ -1,6 +1,7 @@
+ import type { Settings } from "../config/settings";
+ import * as fs from "node:fs";
+ import * as path from "node:path";
++import { setTimeout as delay } from "node:timers/promises";
+ import type {
+ 	ImageContent,
+ 	Message,
+@@ -127,6 +128,7 @@ import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-
+ import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
+ import {
+ 	FileSessionStorage,
++	isSessionLeaseHeld,
+ 	MemorySessionStorage,
+ 	type SessionStorage,
+ 	type SessionStorageWriter,
+@@ -1070,6 +1072,7 @@ export class SessionManager {
+ 	 * after {@link close} gave the claim up.
+ 	 */
+ 	#sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
++	#exactSession = false;
+ 	/**
+ 	 * The background artifact copy a move or branch to `sessionFile` started (see
+ 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
+@@ -1185,6 +1188,7 @@ export class SessionManager {
+ 		if (this.#released || this.#sessionFileRelocating) return false;
+ 		this.#claimSession();
+ 		const claim = this.#sessionClaim;
++		if (this.#exactSession && claim?.release === undefined) throw new Error("EXACT_SESSION_WRITER_REQUIRED");
+ 		return claim !== undefined && claim.sessionId === this.#sessionId && claim.release === undefined;
+ 	}
+ 
+@@ -1324,6 +1328,7 @@ export class SessionManager {
+ 	 * await it. Returns the sibling.
+ 	 */
+ 	#moveOffSessionFile(reason: SessionPersistenceNotice["reason"]): string {
++		if (this.#exactSession) throw new Error("EXACT_SESSION_WRITE_CONFLICT");
+ 		const from = this.#sessionFile as string;
+ 		const previousSessionId = this.#sessionId;
+ 		const timestamp = nowIso();
+@@ -2072,6 +2077,7 @@ export class SessionManager {
+ 	}
+ 
+ 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
++		this.#exactSession = false;
+ 		this.#diskTail = Promise.resolve();
+ 		this.#clearDiskError();
+ 		this.#expectedDiskSize = null;
+@@ -2415,6 +2421,7 @@ export class SessionManager {
+ 		loadedSession?: SessionLoadResult,
+ 		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
+ 	): Promise<void> {
++		this.#exactSession = false;
+ 		await this.#drainAndCloseWriter();
+ 		this.#clearDiskError();
+ 		this.#draftOnlySessionCleanupArmed = false;
+@@ -3768,6 +3775,42 @@ export class SessionManager {
+ 		return entry.id;
+ 	}
+ 
++	/** Observe ownership without claiming, appending, or exposing the release handle. */
++	getExecutorWriterState(): "owned-by-receiver" | "held" | "free" | "unknown" {
++		if (!this.#persist || !this.#sessionFile || this.#released || !(this.#storage instanceof FileSessionStorage)) return "unknown";
++		if (this.#sessionClaim?.sessionId === this.#sessionId && this.#sessionClaim.release) return "owned-by-receiver";
++		const held = isSessionLeaseHeld(this.#sessionId);
++		return held === null ? "unknown" : held ? "held" : "free";
++	}
++
++	/** Lifecycle writes fail closed instead of taking the ordinary sibling path. */
++	appendExecutorRecord(customType: string, data: unknown): string {
++		if (!this.#persist || !this.#sessionFile || !(this.#storage instanceof FileSessionStorage) || this.#released) {
++			throw new Error("EXECUTOR_DURABLE_SESSION_REQUIRED");
++		}
++		if (!this.#sessionClaim?.release) {
++			const release = this.#storage.claimSession(this.#sessionId, this.#sessionFile, true);
++			if (!release) throw new Error("WRITER_HELD");
++			this.#sessionClaim = { sessionId: this.#sessionId, release };
++		}
++		const wasMaterialized = this.#fileIsCurrent;
++		this.#forceFileCreation = true;
++		const id = this.appendCustomEntry(customType, data);
++		this.flushSync();
++		try {
++			const fd = fs.openSync(this.#sessionFile, "r");
++			try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
++			if (!wasMaterialized) {
++				const directory = fs.openSync(path.dirname(this.#sessionFile), "r");
++				try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
++			}
++		} catch (error) {
++			this.#noteDiskFailure(toError(error));
++			throw error;
++		}
++		return id;
++	}
++
+ 	appendCustomEntry(customType: string, data?: unknown): string {
+ 		const entry: CustomEntry = { type: "custom", customType, data, ...this.#freshEntryFields() };
+ 		this.#recordEntry(entry);
+@@ -4421,6 +4464,52 @@ export class SessionManager {
+ 		}
+ 	}
+ 
++	/**
++	 * Claim the original UUID before loading any mutable state. Never follows a
++	 * continuation, moves the journal or mints a sibling. Only actual waiters
++	 * have a timer; cancellation leaves no retained lease.
++	 */
++	static async openExact(
++		filePath: string,
++		options: { expectedSessionId?: string; signal?: AbortSignal; wait?: boolean; onWaiting?: () => void } = {},
++	): Promise<SessionManager> {
++		options.signal?.throwIfAborted();
++		const canonical = fs.realpathSync(filePath);
++		const storage = new FileSessionStorage();
++		const id = await readSessionHeaderId(canonical);
++		if (!id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ||
++			(options.expectedSessionId !== undefined && id.toLowerCase() !== options.expectedSessionId.toLowerCase())) {
++			throw new Error("EXACT_SESSION_IDENTITY_MISMATCH");
++		}
++		let release: (() => void) | null;
++		let notified = false;
++		for (;;) {
++			options.signal?.throwIfAborted();
++			if (await readSessionHeaderId(canonical) !== id) throw new Error("EXACT_SESSION_IDENTITY_MISMATCH");
++			release = storage.claimSession(id, canonical, true);
++			if (release) break;
++			if (options.wait === false) throw new Error("WRITER_HELD");
++			if (!notified) { options.onWaiting?.(); notified = true; }
++			await delay(250, undefined, { signal: options.signal });
++		}
++		try {
++			options.signal?.throwIfAborted();
++			// Read again under the lease, not the snapshot from before waiting.
++			const manager = await SessionManager.open(canonical, undefined, storage, { throwIfMissing: true });
++			if (options.signal?.aborted) { await manager.close(); options.signal.throwIfAborted(); }
++			if (manager.getSessionId() !== id || manager.getSessionFile() !== canonical) {
++				await manager.close();
++				throw new Error("EXACT_SESSION_IDENTITY_MISMATCH");
++			}
++			manager.#sessionClaim = { sessionId: id, release };
++			manager.#exactSession = true;
++			return manager;
++		} catch (error) {
++			release();
++			throw error;
++		}
++	}
++
+ 	/**
+ 	 * Open a specific session file.
+ 	 * @param sessionDir Optional dir for /new or /branch; defaults to the file's parent.
+diff --git a/src/session/session-storage.ts b/src/session/session-storage.ts
+index 46b5a791c8fc6126b3048a306a9c7a44330713fb..42069e9251ad790bf08320ee3378ad309cb9cd06 100644
+--- a/src/session/session-storage.ts
++++ b/src/session/session-storage.ts
+@@ -1342,7 +1342,7 @@ export class FileSessionStorage implements SessionStorage {
+ 	 * Never throws: a lock that cannot be taken for another reason counts as
+ 	 * owned, so it never moves a session off its file.
+ 	 */
+-	claimSession(sessionId: string, sessionPath: string): (() => void) | null {
++	claimSession(sessionId: string, sessionPath: string, strict = false): (() => void) | null {
+ 		const onDisk = readSessionHeaderIdSync(sessionPath);
+ 		if (onDisk !== undefined && onDisk !== sessionId) return null;
+ 		let held = sessionLeases.get(sessionId);
+@@ -1351,6 +1351,7 @@ export class FileSessionStorage implements SessionStorage {
+ 			try {
+ 				lease = tryAcquireSessionLease(sessionId);
+ 			} catch (err) {
++				if (strict) throw err;
+ 				logger.debug("Session ownership lease unavailable", { sessionId, error: toError(err).message });
+ 				return () => {};
+ 			}
+diff --git a/src/tools/bash.ts b/src/tools/bash.ts
+index 4cadae3bf3cdfc54956214ed5d0eaffeb6eff4f9..9dd1a07796d45616fa5b752091e282ec67cd08e5 100644
+--- a/src/tools/bash.ts
++++ b/src/tools/bash.ts
+@@ -1474,6 +1474,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
+ 						onStart: probe => {
+ 							pids = probe;
+ 						},
++						onRun: exited => this.session.trackProcessExit?.(exited, jobId),
++						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
+ 					}).finally(() => {
+ 						pids = NO_PIDS;
+ 						liveTrace = undefined;
+@@ -2047,6 +2049,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
+ 						: undefined,
+ 					outputByteLimit: DEFAULT_MAX_BYTES,
+ 				});
++				// The client owns the process: its exit report (or the release that ends the terminal) is the evidence.
++				this.session.trackProcessExit?.(createP.then(created => created.waitForExit()));
+ 				const createRaced = await Promise.race([
+ 					createP.then(createdHandle => ({ kind: "created" as const, handle: createdHandle })),
+ 					timeoutPromise,
+@@ -2328,6 +2332,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
+ 								}
+ 							: undefined,
+ 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
++					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
++					onRun: exited => this.session.trackProcessExit?.(exited),
+ 				});
+ 		const wallTimeMs = performance.now() - wallTimeStart;
+ 		if (result.cancelled) {
+diff --git a/src/tools/index.ts b/src/tools/index.ts
+index 304971c4ed1ec134b872b1e556add79bfa0fbeda..c13389d783504b191fad1cd191474933ba8b65d9 100644
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -251,6 +251,8 @@ export interface ToolSession {
+ 	tuiTranscript?: boolean;
+ 	/** Whether this session has begun disposal. */
+ 	isDisposed?: () => boolean;
++	/** Record a started native process; `exited` settles once it is gone (see `AgentSession.trackProcessExit`). */
++	trackProcessExit?: (exited: Promise<unknown>, jobId?: string) => void;
+ 	/**
+ 	 * Suppress the spawn specialization/coordination advisory appended to `task`
+ 	 * results. Set by internal/programmatic callers (e.g. the commit agent's

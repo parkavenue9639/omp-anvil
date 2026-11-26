@@ -1,0 +1,1491 @@
+diff --git a/dist/types/extensibility/skills.d.ts b/dist/types/extensibility/skills.d.ts
+index c4d266e42b89dd7043521a1c8780a0d687f40975..98e4c1b0037c7d47cbb729cbee6e21947b389f3c 100644
+--- a/dist/types/extensibility/skills.d.ts
++++ b/dist/types/extensibility/skills.d.ts
+@@ -61,6 +61,8 @@ export declare function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Pr
+ export interface LoadSkillsOptions extends SkillsSettings {
+     /** Working directory for project-local skills. Default: getProjectDir() */
+     cwd?: string;
++    /** Additional workspace directories whose project-level skills should also be loaded (multi-root). */
++    additionalDirectories?: readonly string[];
+     /** Disabled extension ids (`disabledExtensions`); `skill:<name>` entries hide those skills. */
+     disabledExtensions?: string[];
+     /**
+diff --git a/dist/types/sdk.d.ts b/dist/types/sdk.d.ts
+index 039b77de695fcaf3dbec66b2f31bf0a495b3f1fe..165bc222f1b04ef189a8c327f868c030a7cca9ba 100644
+--- a/dist/types/sdk.d.ts
++++ b/dist/types/sdk.d.ts
+@@ -614,7 +614,7 @@ export declare function resolvePrewalkTarget(patterns: readonly string[], target
+ /**
+  * Discover skills from cwd and agentDir.
+  */
+-export declare function discoverSkills(cwd?: string, _agentDir?: string, settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions">): Promise<{
++export declare function discoverSkills(cwd?: string, _agentDir?: string, settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions" | "additionalDirectories">): Promise<{
+     skills: Skill[];
+     warnings: SkillWarning[];
+ }>;
+diff --git a/dist/types/task/executor.d.ts b/dist/types/task/executor.d.ts
+index 4e9bc1d50863299c68d63af0664efca2c1a198ff..8f44b1337d81c8f04f6254afb1eea91a38c28032 100644
+--- a/dist/types/task/executor.d.ts
++++ b/dist/types/task/executor.d.ts
+@@ -105,6 +105,7 @@ export interface ExecutorOptions {
+     /** Parent session whose stored credential affinities seed the child session. */
+     credentialSourceSessionId?: string;
+     worktree?: string;
++    boundWorktree?: string;
+     agent: AgentDefinition;
+     task: string;
+     /**
+diff --git a/dist/types/task/structured-subagent.d.ts b/dist/types/task/structured-subagent.d.ts
+index 324288aff70caa8094fee61c9ee0fd01e354dfdb..82bd9ed34610287a428ab872e24c93160ebcc83f 100644
+--- a/dist/types/task/structured-subagent.d.ts
++++ b/dist/types/task/structured-subagent.d.ts
+@@ -47,6 +47,8 @@ export interface StructuredSubagentRequest {
+      */
+     steps?: string[];
+     agent?: string;
++    /** Target directory inside the workspace or a registered sibling git worktree. */
++    cwd?: string;
+     /**
+      * Model chosen by host code (SDK callers, `omp cleanse --model`).
+      * Not gated by `task.perCallModel`.
+@@ -140,6 +142,8 @@ export interface EffectiveSubagentPolicy {
+     enableIrc: boolean;
+     /** Caller `effort` hint to apply; dropped when the agent's level comes from the user's `^model:level` tag. */
+     effort?: TaskEffort;
++    resolvedCwd?: string;
++    boundWorktree?: string;
+ }
+ /** Settled child execution plus data needed by the frontends' own rendering. */
+ export interface StructuredSubagentResult {
+@@ -179,6 +183,7 @@ export declare function invalidModelSelectorReason(model: unknown, label: string
+     settings: Settings;
+     invocationKind: "task" | "eval";
+ }): string | undefined;
++export declare function invalidSpawnCwdReason(cwd: unknown, label: string): string | undefined;
+ /**
+  * Resolve every policy shared by task and eval before allocating artifacts or
+  * dispatching work. Callers translate {@link StructuredSubagentError} into
+diff --git a/dist/types/task/types.d.ts b/dist/types/task/types.d.ts
+index 37ee95ef08e1ebb6df3e34759d42bbf55b298c89..481a334702da791282dae75b3eefb87f439d9c09 100644
+--- a/dist/types/task/types.d.ts
++++ b/dist/types/task/types.d.ts
+@@ -17,6 +17,8 @@ export interface SubagentEventPayload {
+ }
+ export declare const taskItemSchema: FluentType<{
+     agent: string;
++    cwd?: string | undefined;
++    model?: string | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+     schemaMode?: "permissive" | "strict" | undefined;
+@@ -25,6 +27,8 @@ export declare const taskItemSchema: FluentType<{
+     tools?: string[] | undefined;
+ }, {
+     agent?: string | undefined;
++    cwd?: string | undefined;
++    model?: string | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+     schemaMode?: "permissive" | "strict" | undefined;
+@@ -34,6 +38,7 @@ export declare const taskItemSchema: FluentType<{
+ }>;
+ export declare const taskSchema: FluentType<{
+     agent: string;
++    cwd?: string | undefined;
+     isolated?: boolean | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+@@ -43,6 +48,7 @@ export declare const taskSchema: FluentType<{
+     tools?: string[] | undefined;
+ }, {
+     agent?: string | undefined;
++    cwd?: string | undefined;
+     isolated?: boolean | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+@@ -53,6 +59,7 @@ export declare const taskSchema: FluentType<{
+ }>;
+ declare const ALL_TASK_SCHEMAS: readonly [FluentType<{
+     agent: string;
++    cwd?: string | undefined;
+     isolated?: boolean | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+@@ -62,6 +69,7 @@ declare const ALL_TASK_SCHEMAS: readonly [FluentType<{
+     tools?: string[] | undefined;
+ }, {
+     agent?: string | undefined;
++    cwd?: string | undefined;
+     isolated?: boolean | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+@@ -71,6 +79,8 @@ declare const ALL_TASK_SCHEMAS: readonly [FluentType<{
+     tools?: string[] | undefined;
+ }>, FluentType<{
+     agent: string;
++    cwd?: string | undefined;
++    model?: string | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+     schemaMode?: "permissive" | "strict" | undefined;
+@@ -79,6 +89,8 @@ declare const ALL_TASK_SCHEMAS: readonly [FluentType<{
+     tools?: string[] | undefined;
+ }, {
+     agent?: string | undefined;
++    cwd?: string | undefined;
++    model?: string | undefined;
+     name?: string | undefined;
+     outputSchema?: string | boolean | object | null | undefined;
+     schemaMode?: "permissive" | "strict" | undefined;
+diff --git a/src/eval/agent-bridge.ts b/src/eval/agent-bridge.ts
+index eb24b4db77023a4d5dc223803ac9e1bc43b763c7..6d383291c3829ee4c0a866e0ad214f42c914fa2c 100644
+--- a/src/eval/agent-bridge.ts
++++ b/src/eval/agent-bridge.ts
+@@ -9,6 +9,7 @@ import {
+ 	buildStructuredSubagentRecoveryHint,
+ 	invalidModelSelectorReason,
+ 	normalizeModelSelector,
++	invalidSpawnCwdReason,
+ 	reserveStructuredSubagentId,
+ 	resolveEffectiveSubagentPolicy,
+ 	runStructuredSubagent,
+@@ -35,6 +36,7 @@ const agentArgsSchema = type({
+ 	"isolated?": "boolean",
+ 	"apply?": "boolean",
+ 	"merge?": "boolean",
++	"cwd?": "string",
+ 	"tools?": "string[]",
+ 	"+": "delete",
+ });
+@@ -49,6 +51,7 @@ interface EvalAgentArgs {
+ 	isolated?: boolean;
+ 	apply?: boolean;
+ 	merge?: boolean;
++	cwd?: string;
+ 	tools?: string[];
+ }
+ 
+@@ -97,6 +100,8 @@ function parseAgentArgs(args: unknown, settings: Settings): EvalAgentArgs {
+ 	const model = normalizeModelSelector(result.model);
+ 	const selectorProblem = invalidModelSelectorReason(model, "agent()", { settings, invocationKind: "eval" });
+ 	if (selectorProblem) throw new ToolError(selectorProblem);
++	const cwdProblem = invalidSpawnCwdReason(result.cwd, "agent()");
++	if (cwdProblem) throw new ToolError(cwdProblem);
+ 	return { ...result, model };
+ }
+ 
+@@ -207,6 +212,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+ 			...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
+ 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
+ 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
++			...(parsed.cwd !== undefined ? { cwd: parsed.cwd.trim() } : {}),
+ 			...(isolation ? { isolation } : {}),
+ 			...(customTools ? { customTools } : {}),
+ 		});
+@@ -231,6 +237,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
+ 						...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
+ 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
+ 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
++						...(parsed.cwd !== undefined ? { cwd: parsed.cwd.trim() } : {}),
+ 						identity: { id, label: parsed.label },
+ 						...(isolation ? { isolation } : {}),
+ 						...(customTools ? { customTools } : {}),
+diff --git a/src/eval/js/shared/prelude.txt b/src/eval/js/shared/prelude.txt
+index 78d7ccabbdbecd58bd2f5d5cca903ad022bcf332..9acb05d26c14102e6cdc95f93bfb6a0efa745d9a 100644
+--- a/src/eval/js/shared/prelude.txt
++++ b/src/eval/js/shared/prelude.txt
+@@ -618,8 +618,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
+ 				"agent",
+ 				opts,
+ 				rest,
+-				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model"],
+-				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model }",
++				["agent", "label", "schema", "isolated", "apply", "merge", "cwd", "schemaMode", "tools", "model"],
++				"{ agent, label, schema, schemaMode, isolated, apply, merge, cwd, tools, model }",
+ 			);
+ 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+ 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+diff --git a/src/eval/py/prelude.py b/src/eval/py/prelude.py
+index 64500abc90ebbe3edf65316cf35b42719849978a..146878e250aa828397a1c2a6a143c2f9d18c5080 100644
+--- a/src/eval/py/prelude.py
++++ b/src/eval/py/prelude.py
+@@ -1054,6 +1054,7 @@ if "__omp_prelude_loaded__" not in globals():
+         isolated=None,
+         apply=None,
+         merge=None,
++        cwd=None,
+         tools=None,
+         model=None,
+     ):
+@@ -1073,6 +1074,8 @@ if "__omp_prelude_loaded__" not in globals():
+             args["apply"] = bool(apply)
+         if merge is not None:
+             args["merge"] = bool(merge)
++        if cwd is not None:
++            args["cwd"] = cwd
+         if tools is not None:
+             args["tools"] = list(tools)
+         if model is not None:
+diff --git a/src/extensibility/skill-descriptions.ts b/src/extensibility/skill-descriptions.ts
+index 72de20f7e159a160d38a36d2c0ecbd9db275a5b1..3891cc098a74479309ae00b786c5b2f7cc3fac28 100644
+--- a/src/extensibility/skill-descriptions.ts
++++ b/src/extensibility/skill-descriptions.ts
+@@ -33,6 +33,7 @@ const MAX_PREVIEW_CHARS = 100;
+ // A sentence or word cut shorter than this discards too much; cut at the budget instead.
+ const MIN_PREVIEW_CUT = 40;
+ const MAX_COMPRESSED_CHARS = 160;
++const MAX_COMPRESSED_WORDS = 12;
+ // Revision of validCompression's rules, part of every unusable-answer marker: bump it whenever the
+ // rules accept more, so answers an older, stricter revision rejected are asked for again.
+ const VALIDATION_REVISION = 2;
+@@ -194,6 +195,8 @@ export function previewSkillDescription(description: string): string {
+ function validCompression(text: string): string | null {
+ 	const line = text.trim();
+ 	if (!line || /[\r\n]/.test(line) || line.length > MAX_COMPRESSED_CHARS) return null;
++	if (/^(?:\{|\[|```)/.test(line)) return null;
++	if (line.split(/\s+/).length > MAX_COMPRESSED_WORDS) return null;
+ 	return line;
+ }
+ 
+@@ -469,7 +472,8 @@ export class RoutingHintCatalog {
+ 			let hint = this.#snapshot.get(request.key);
+ 			if (hint !== undefined) return hint;
+ 			try {
+-				hint = store?.get(request.key);
++				const cached = store?.get(request.key);
++				hint = cached === undefined ? undefined : (validCompression(cached) ?? undefined);
+ 			} catch (error) {
+ 				logger.warn("Routing hint cache read failed", { error: String(error) });
+ 			}
+diff --git a/src/extensibility/skills.ts b/src/extensibility/skills.ts
+index 4e6549946af364a71810f67fddad64347c56839c..3c5675300e6f535afbceda100a2f3467351f8645 100644
+--- a/src/extensibility/skills.ts
++++ b/src/extensibility/skills.ts
+@@ -1,5 +1,6 @@
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
++import * as path from "node:path";
+ import {
+ 	getProjectDir,
+ 	isEnoent,
+@@ -287,6 +288,8 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
+ export interface LoadSkillsOptions extends SkillsSettings {
+ 	/** Working directory for project-local skills. Default: getProjectDir() */
+ 	cwd?: string;
++	/** Additional workspace directories whose project-level skills should also be loaded (multi-root). */
++	additionalDirectories?: readonly string[];
+ 	/** Disabled extension ids (`disabledExtensions`); `skill:<name>` entries hide those skills. */
+ 	disabledExtensions?: string[];
+ 	/**
+@@ -297,6 +300,67 @@ export interface LoadSkillsOptions extends SkillsSettings {
+ 	extensionRoots?: EffectiveExtensionRoots;
+ }
+ 
++async function canonicalSkillPath(targetPath: string): Promise<string> {
++	const resolved = path.resolve(targetPath);
++	try {
++		return await fs.realpath(resolved);
++	} catch {
++		return resolved;
++	}
++}
++
++async function loadCapabilitySkillsAcrossDirs(
++	cwd: string,
++	additionalDirectories: readonly string[] | undefined,
++	disabledExtensions: string[] | undefined,
++	extensionRoots: EffectiveExtensionRoots | undefined,
++): Promise<{ all: CapabilitySkill[]; warnings?: string[] }> {
++	const primary = await loadCapability<CapabilitySkill>(skillCapability.id, {
++		cwd,
++		disabledExtensions,
++		extensionRoots,
++	});
++	if (!additionalDirectories || additionalDirectories.length === 0) {
++		return primary;
++	}
++
++	const seenDirs = new Set<string>([await canonicalSkillPath(cwd)]);
++	const seenSkillPaths = new Set<string>();
++	const all: CapabilitySkill[] = [];
++	const warnings = [...(primary.warnings ?? [])];
++
++	const addCandidate = async (capSkill: CapabilitySkill): Promise<void> => {
++		const canonical = await canonicalSkillPath(capSkill.path);
++		if (seenSkillPaths.has(canonical)) return;
++		seenSkillPaths.add(canonical);
++		all.push(capSkill);
++	};
++
++	for (const capSkill of primary.all) {
++		await addCandidate(capSkill);
++	}
++
++	for (const rawDir of additionalDirectories) {
++		if (!rawDir) continue;
++		const resolvedDir = path.resolve(rawDir);
++		const canonDir = await canonicalSkillPath(resolvedDir);
++		if (seenDirs.has(canonDir)) continue;
++		seenDirs.add(canonDir);
++		const extra = await loadCapability<CapabilitySkill>(skillCapability.id, {
++			cwd: resolvedDir,
++			disabledExtensions,
++			extensionRoots,
++		});
++		if (extra.warnings) warnings.push(...extra.warnings);
++		for (const capSkill of extra.all) {
++			if (capSkill.level !== "project") continue;
++			await addCandidate(capSkill);
++		}
++	}
++
++	return { all, warnings };
++}
++
+ /**
+  * Load skills from all configured locations.
+  * Returns skills and any validation warnings.
+@@ -349,11 +413,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
+ 	}
+ 
+ 	// Use capability API to load all skills
+-	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
++	const result = await loadCapabilitySkillsAcrossDirs(
+ 		cwd,
++		options.additionalDirectories,
+ 		disabledExtensions,
+ 		extensionRoots,
+-	});
++	);
+ 
+ 	const skillMap = new Map<string, Skill>();
+ 	const realPathSet = new Set<string>();
+diff --git a/src/prompts/system/system-prompt.md b/src/prompts/system/system-prompt.md
+index 84d88d27870066bb270cb5d07df60289e8768c23..61776589579bde966446634479d18cde2164a223 100644
+--- a/src/prompts/system/system-prompt.md
++++ b/src/prompts/system/system-prompt.md
+@@ -35,10 +35,18 @@ You are omp's trusted coding assistant.
+ {{personality}}
+ {{/if}}
+ 
+-⁂ Runtime
+-{{#ifAny skills.length alwaysApplyRules.length rules.length}}
++§ Runtime
++{{#ifAny projectSkills.length skills.length alwaysApplyRules.length rules.length}}
+ # Skills & Rules
+ {{/ifAny}}
++{{#if projectSkills.length}}
++Matching project skill → MUST read `skill://<name>` first.
++<project-skills>
++{{#each projectSkills}}
++- {{name}}: {{description}}
++{{/each}}
++</project-skills>
++{{/if}}
+ {{#if skills.length}}
+ Matching skill → MUST read skill://<name> first.
+ <skills>
+@@ -183,10 +191,10 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
+ - Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B asks A via `write agent://<id>` only if blocked.{{/if}}
+ {{/has}}
+ 
+-⁂ Workflow
+-# 1. Before Editing
+-{{#ifAny skills.length rules.length}}
+-- Read relevant {{#if skills.length}}skills{{#if rules.length}} and rules{{/if}}{{else}}rules{{/if}} first.
++§ Workflow
++# 1. Scope
++{{#ifAny projectSkills.length skills.length rules.length}}
++- Read relevant {{#ifAny projectSkills.length skills.length}}skills{{#if rules.length}} and rules{{/if}}{{else}}rules{{/ifAny}} first.
+ {{/ifAny}}
+ - Reuse existing patterns; NEVER add a second convention.
+ {{#has tools "lsp"}}
+@@ -198,9 +206,10 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
+ {{#has tools "ask"}}- Ask before destructive commands or deleting unrelated code you didn't write; code your change makes obsolete is in scope.{{else}}- NEVER run destructive git commands or delete unrelated code you didn't write; code your change makes obsolete is in scope.{{/has}}
+ 
+ {{#if subagent}}
+-# 2. Hand-off
+-- NEVER run builds, tests, linters, formatters or smoke runs unless your assignment says to; the main agent verifies once all subagents land.
+-- Done → yield, naming the checks to run.
++# 5. Hand-off
++Main agent runs heavy/shared verification once all subagents land; parallel runs storm the CPU and trip on siblings' half-finished edits.
++- {{#has tools "lsp"}}Run `lsp` `diagnostics` on code files you modified before yielding (skip cleanly if no language server is configured for that file type). {{/has}}NEVER run builds, test suites, project-wide linters/formatters, or stateful/GUI smoke runs unless your assignment explicitly instructs it.
++- Changes complete → yield; report files edited, `diagnostics` result (or skip), and checks main agent should run.
+ {{else}}
+ # 2. Verify
+ Run the narrowest check that exercises the change, once. Investigation: the output is the proof; no tests.
+diff --git a/src/prompts/tools/eval-agents.md b/src/prompts/tools/eval-agents.md
+index efa1df924936842f0e28c78ea7e1bdbf4717a9c5..5941505ecc5378cb7d40f4141ead377d4d375ba1 100644
+--- a/src/prompts/tools/eval-agents.md
++++ b/src/prompts/tools/eval-agents.md
+@@ -1,8 +1,8 @@
+ ```
+ {{#if py}}
+-agent(prompt, *, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema_mode?=None, isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → AgentHandle
++agent(prompt, *, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema_mode?=None, isolated?=None, apply?=None, merge?=None, cwd?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → AgentHandle
+ {{else}}
+-await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → AgentHandle
++await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, cwd?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → AgentHandle
+ {{/if}}
+   Spawns a background subagent and returns immediately.
+   - `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}}
+@@ -27,6 +27,7 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
+   - `isolated` runs it in a worktree (requires `task.isolation.enabled`).
+   - `{{#if py}}apply=False{{else}}apply: false{{/if}}` keeps its changes as patch/branch artifacts instead of applying them.
+   - `{{#if py}}merge=False{{else}}merge: false{{/if}}` forces patch mode, otherwise `task.isolation.merge` decides.
++  - `cwd`: existing directory inside the workspace or a registered sibling git worktree of the same repository; binds working directory and repository context without creating/removing a worktree (mutually exclusive with `isolated`).
+ {{#if evalTools}}
+   - `tools`: names of tools you defined with {{#ifAll py js}}`@tool` / `tool(fn)`{{else}}{{#if py}}`@tool`{{else}}`tool(fn)`{{/if}}{{/ifAll}} that the child may call.
+ {{/if}}
+diff --git a/src/prompts/tools/task.md b/src/prompts/tools/task.md
+index 3d723b3f9b2009cb9aca790c7e6cfbf8dc3f439c..5f9ebe44d29f3b52927a4b7adc4f0fb950b3fcd7 100644
+--- a/src/prompts/tools/task.md
++++ b/src/prompts/tools/task.md
+@@ -27,9 +27,8 @@ Run one agent synchronously.
+ # Delegation
+ Delegation is optional. Read `skill://subagent-coordination` before non-trivial dispatch for inline-vs-delegate economics, specialist trade-offs, and orchestration patterns; select each item's `agent` from `# Available Agents` below by openness, internal complexity, and surface rather than defaulting heterogeneous work to `{{defaultAgent}}`.
+ Use `creative` sparingly, only for innovative projects, major innovative features, or an explicit need for differentiated exploration; routine features and ordinary plans do not need it. File count, material length, images, and keywords alone do not select a preset.
+-{{#if batchEnabled}}Specialist `agent` selectors belong inside each `tasks[]` item; NEVER put `agent` at the top level.
+-{{/if}}
+-Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. Set shared interfaces in {{#if batchEnabled}}`context` (or `local://<path>`){{else}}the task{{/if}}. Children may run fast isolated file-level checks when non-conflicting; reserve workspace-wide builds, codegen, formatters, and shared test gates for parent integration.
++{{#if batchEnabled}}Put specialist `agent` selectors and per-task `cwd` inside each `tasks[]` item, NEVER at the top level.
++{{/if}}Keep `scout` read-only (no `bash`/`eval`); mutating children own disjoint files in their assigned `cwd`. Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. Set shared interfaces in {{#if batchEnabled}}`context` (or `local://<path>`){{else}}the task{{/if}}. Children may run fast isolated file-level checks when non-conflicting; reserve workspace-wide builds, codegen, formatters, and shared test gates for parent integration.
+ 
+ # Inputs
+ - `agent`: most specific{{#if batchEnabled}}, inside each `tasks[]` item, NEVER at the top level{{/if}}.
+@@ -94,6 +93,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
+ - `isolated`: worktree; changes retained, not applied.
+ {{/if}}
+ {{/if}}
++- `cwd`: an existing directory inside the workspace or a registered sibling git worktree of the same repository{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Binds the working directory and repository context without creating/removing a worktree; mutually exclusive with `isolated`.
+ 
+ # Available Agents
+ {{#if spawningDisabled}}Agent spawning is currently disabled.
+diff --git a/src/sdk.ts b/src/sdk.ts
+index 1260e7024092da339ca1e87c963ae959eedff904..a2d64a6ac693982bfee25e77dcceccf0e72f9e00 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -1419,7 +1419,7 @@ export async function resolvePrewalkTarget(
+ export async function discoverSkills(
+ 	cwd?: string,
+ 	_agentDir?: string,
+-	settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions">,
++	settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions" | "additionalDirectories">,
+ ): Promise<{ skills: Skill[]; warnings: SkillWarning[] }> {
+ 	return await loadSkillsInternal({
+ 		...settings,
+@@ -1427,6 +1427,38 @@ export async function discoverSkills(
+ 	});
+ }
+ 
++async function loadSessionRules(
++	cwd: string,
++	agentDir: string,
++	additionalDirectories: readonly string[],
++): Promise<{ items: Rule[]; warnings?: string[] }> {
++	const primary = await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
++	if (additionalDirectories.length === 0) return primary;
++
++	const seenDirs = new Set([path.resolve(cwd)]);
++	const seenPaths = new Set(primary.items.map(rule => path.resolve(rule.path)));
++	const items = [...primary.items];
++	const warnings = [...(primary.warnings ?? [])];
++
++	for (const rawDir of additionalDirectories) {
++		if (!rawDir) continue;
++		const resolvedDir = path.resolve(rawDir);
++		if (seenDirs.has(resolvedDir)) continue;
++		seenDirs.add(resolvedDir);
++		const extra = await loadCapability<Rule>(ruleCapability.id, { cwd: resolvedDir, agentDir });
++		if (extra.warnings) warnings.push(...extra.warnings);
++		for (const rule of extra.items) {
++			if (rule._source.level !== "project") continue;
++			const resolvedPath = path.resolve(rule.path);
++			if (seenPaths.has(resolvedPath)) continue;
++			seenPaths.add(resolvedPath);
++			items.push(rule);
++		}
++	}
++
++	return { items, warnings: warnings.length > 0 ? warnings : undefined };
++}
++
+ /**
+  * Discover context files (AGENTS.md) walking up from cwd.
+  * Returns files sorted by depth (farther from cwd first, so closer files appear last/more prominent).
+@@ -2214,17 +2246,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
+ 			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
+ 	customCommandsPromise.catch(() => {});
+-	const skillsSettings = cfgSkills.get(settings);
+-	const disabledExtensionIds = cfgDisabledExtensions.get(settings);
+-	const discoveredSkillsPromise =
+-		options.skills === undefined
+-			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
+-					...skillsSettings,
+-					disabledExtensions: disabledExtensionIds,
+-				})
+-			: undefined;
+-	discoveredSkillsPromise?.catch(() => {});
+-
+ 	const sessionManager =
+ 		options.sessionManager ??
+ 		logger.time("sessionManager", () =>
+@@ -2239,6 +2260,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		const merged = [...new Set([...existing, ...configuredDirs])];
+ 		await sessionManager.setAdditionalDirectories(merged);
+ 	}
++
++	const skillsSettings = cfgSkills.get(settings);
++	const disabledExtensionIds = cfgDisabledExtensions.get(settings);
++	const discoveredSkillsPromise =
++		options.skills === undefined
++			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
++					...skillsSettings,
++					disabledExtensions: disabledExtensionIds,
++					additionalDirectories: sessionManager.getAdditionalDirectories(),
++				})
++			: undefined;
++	discoveredSkillsPromise?.catch(() => {});
+ 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+ 	const taskPromptCacheKey = options.taskPromptCacheKey ?? sessionManager.getHeader()?.taskPromptCacheKey;
+ 	if (taskPromptCacheKey !== undefined) await sessionManager.setTaskPromptCacheKey(taskPromptCacheKey);
+@@ -2534,7 +2567,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		const rulesResult =
+ 			options.rules !== undefined
+ 				? { items: options.rules, warnings: undefined }
+-				: await loadCapability<Rule>(ruleCapability.id, { cwd, agentDir });
++				: await loadSessionRules(cwd, agentDir, sessionManager.getAdditionalDirectories());
+ 		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+ 			builtinRules: ttsrSettings.builtinRules,
+ 			disabledRules: ttsrSettings.disabledRules,
+@@ -4553,7 +4586,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					options.rules ??
+ 						logger
+ 							.time("rediscoverRules", () =>
+-								loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd, agentDir }),
++								loadSessionRules(promptCwd, agentDir, sessionManager.getAdditionalDirectories()),
+ 							)
+ 							.then(result => result.items),
+ 				]);
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index b7799326abb9363a5fe4f220c1f1a7a5fd444e44..2b20b77b2fe44a3581785dd887f227fe004ec359 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -3828,7 +3828,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			const autoQaEnabled = isAutoQaEnabled(this.settings);
+ 			const autoQaChanged = autoQaEnabled !== this.#autoQaEnabled;
+ 			this.#autoQaEnabled = autoQaEnabled;
+-			if ((rootsChanged || autoQaChanged) && !this.#isDisposed) await this.refreshBaseSystemPrompt();
++			if (rootsChanged && !this.#isDisposed) await this.refreshSkills();
++			else if (autoQaChanged && !this.#isDisposed) await this.refreshBaseSystemPrompt();
+ 		});
+ 	}
+ 
+diff --git a/src/session/session-tools.ts b/src/session/session-tools.ts
+index 5f888d48731a660c07cd4940fb9441cf8425b8f6..4976e92ffbee3d9c3ad6af6ff45ad1145f820f70 100644
+--- a/src/session/session-tools.ts
++++ b/src/session/session-tools.ts
+@@ -791,6 +791,7 @@ export class SessionTools {
+ 		const discovered = await loadSkills({
+ 			...skillsSettings,
+ 			cwd: this.#host.sessionManager.getCwd(),
++			additionalDirectories: this.#host.sessionManager.getAdditionalDirectories(),
+ 			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
+ 			extensionRoots: this.#host.effectiveExtensionRoots(),
+ 		});
+diff --git a/src/slash-commands/builtin-lifecycle.ts b/src/slash-commands/builtin-lifecycle.ts
+index 99793e0ef7a06da8c61e26ff16c6c54504378804..b70f35d35a66dbe417f3a0499e94ae1a6f78d95e 100644
+--- a/src/slash-commands/builtin-lifecycle.ts
++++ b/src/slash-commands/builtin-lifecycle.ts
+@@ -781,7 +781,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
+ 				await runtime.output(`Already in the workspace: ${resolved}`);
+ 				return commandConsumed();
+ 			}
+-			await runtime.session.refreshBaseSystemPrompt();
++			await runtime.session.refreshSkills();
+ 			await runtime.output(formatWorkspaceDirectories(runtime, `Added ${added}.`));
+ 			return commandConsumed();
+ 		},
+@@ -810,7 +810,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
+ 				await runtime.output(`Not a workspace directory: ${resolved}`);
+ 				return commandConsumed();
+ 			}
+-			await runtime.session.refreshBaseSystemPrompt();
++			await runtime.session.refreshSkills();
+ 			await runtime.output(formatWorkspaceDirectories(runtime, `Removed ${removed}.`));
+ 			return commandConsumed();
+ 		},
+diff --git a/src/system-prompt.ts b/src/system-prompt.ts
+index 67c1a731af24524bb901197a12e1b86f7fb799c0..dc27aeea43516ebb610e0c9e51de28648e8d235a 100644
+--- a/src/system-prompt.ts
++++ b/src/system-prompt.ts
+@@ -927,7 +927,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
+ 		providedSkills !== undefined
+ 			? Promise.resolve(providedSkills)
+ 			: skillsSettings?.enabled !== false
+-				? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).then(result => result.skills)
++				? loadSkills({
++						...skillsSettings,
++						cwd: resolvedCwd,
++						additionalDirectories: additionalWorkspaceRoots,
++					}).then(result => result.skills)
+ 				: Promise.resolve([]);
+ 	const activeRepoContextPromise =
+ 		providedActiveRepoContext !== undefined
+@@ -1056,12 +1060,23 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
+ 	//   name, not just `read`, so custom resolvers count once projected; mounted
+ 	//   xd:// tools count too when their metadata is projected);
+ 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
++	const LEAF_SUBAGENT_HIDDEN_SKILLS = new Set(["subagent-coordination", "goal-loop-planning"]);
++	const isProjectSkill = (skill: Skill): boolean =>
++		skill._source?.level === "project" || skill.source.endsWith(":project");
++	const isLeafSubagent = subagent && !toolNames.includes("task");
+ 	const hasSkillReader =
+ 		tools === undefined
+ 			? toolNames.includes("read")
+ 			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
+ 				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
+-	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
++	const visibleSkills = hasSkillReader
++		? skills.filter(
++				skill =>
++					skill.hide !== true &&
++					!(isLeafSubagent && !isProjectSkill(skill) && LEAF_SUBAGENT_HIDDEN_SKILLS.has(skill.name)),
++			)
++		: [];
++	const hasSkillUriAccess = hasSkillReader && visibleSkills.length > 0;
+ 	const schemeHost: SchemeHost = {
+ 		skillUriAccess: hasSkillUriAccess,
+ 		ruleCount: rules?.length ?? 0,
+@@ -1072,8 +1087,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
+ 		crossInstanceAgents,
+ 		subagent,
+ 	};
++	const renderedProjectSkills = visibleSkills
++		.filter(isProjectSkill)
++		.map(skill => ({ ...skill, description: skill.description.replace(/\s+/g, " ").trim() }));
+ 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
+-		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
++		visibleSkills.filter(skill => !isProjectSkill(skill)),
+ 	);
+ 
+ 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
+@@ -1127,6 +1145,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
+ 		hasSkillUriAccess,
+ 		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
+ 		internalUrlReference: InternalUrlRouter.instance().reference(),
++		projectSkills: renderedProjectSkills,
+ 		skills: filteredSkills,
+ 		rules: rules ?? [],
+ 		alwaysApplyRules: injectedAlwaysApplyRules,
+diff --git a/src/task/executor.ts b/src/task/executor.ts
+index 955267d3ceb0bf43fb3956263c8ff4b88a149da4..a6e2aacba248287cffe46bce5c5a3d8ec7cff06b 100644
+--- a/src/task/executor.ts
++++ b/src/task/executor.ts
+@@ -436,6 +436,8 @@ export interface ExecutorOptions {
+ 	/** Parent session whose stored credential affinities seed the child session. */
+ 	credentialSourceSessionId?: string;
+ 	worktree?: string;
++	/** Non-isolated git worktree root bound to this spawn (retains warm/cold revival). */
++	boundWorktree?: string;
+ 	agent: AgentDefinition;
+ 	task: string;
+ 	/**
+@@ -4685,8 +4687,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 			...compactionThresholdSettings(options.compactionThresholdOverride),
+ 			...subagentLspWritethroughSettings(settings),
+ 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+-			// Isolated runs must not expose roots outside the worktree.
+-			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
++			// Isolated and bound-worktree runs must not expose roots outside the worktree.
++			...(worktree !== undefined || options.boundWorktree !== undefined
++				? { "workspace.additionalDirectories": [] }
++				: undefined),
+ 			...(advisorSelection ? { "advisor.enabled": true } : undefined),
+ 			...(advisorRolePattern
+ 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
+@@ -4711,10 +4715,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 	let toolNames: string[] | undefined;
+ 	if (agent.tools) {
+ 		toolNames = structured ? agent.tools : agent.tools.filter(name => name !== "yield");
+-		// Auto-include task tool if spawns allows delegation and task not in tools
++		// Auto-include task tool if spawns allows delegation and task not in tools;
++		// strip task if spawns is explicitly empty (`spawns: []`).
+ 		const canSpawn = agent.spawns === "*" || (agent.spawns?.length ?? 0) > 0;
+ 		if (!restrictToolNames && canSpawn && !toolNames.includes("task") && !atMaxDepth) {
+ 			toolNames = [...toolNames, "task"];
++		} else if (!canSpawn && agent.spawns !== undefined && toolNames.includes("task")) {
++			toolNames = toolNames.filter(name => name !== "task");
+ 		}
+ 	}
+ 
+@@ -5222,14 +5229,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 					outputSchemaMode: options.outputSchemaMode,
+ 					restrictToolNames,
+ 					requireYieldTool: structured,
+-					contextFiles: options.contextFiles,
++					contextFiles: worktree !== undefined ? undefined : options.contextFiles,
+ 					noContextFiles: options.noContextFiles,
+-					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
+-					excludeAgentsMd: true,
+-					skills: options.skills,
++					// Subagents inherit repository AGENTS.md from workspace roots.
++					excludeAgentsMd: false,
++					skills: worktree !== undefined ? undefined : options.skills,
+ 					promptTemplates: options.promptTemplates,
+-					workspaceTree: options.workspaceTree,
+-					rules: options.rules,
++					workspaceTree: worktree !== undefined ? undefined : options.workspaceTree,
++					rules: worktree !== undefined ? undefined : options.rules,
+ 					extensionRoots: options.extensionRoots,
+ 					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
+ 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
+@@ -5267,7 +5274,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 					context: options.context?.trim() ?? "",
+ 					planReference: options.planReference?.content ?? "",
+ 					planReferencePath: options.planReference?.path ?? "",
+-					worktree: worktree ?? "",
++					worktree: worktree ?? options.boundWorktree ?? "",
+ 					structured,
+ 					outputSchema: normalizedOutputSchema,
+ 					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+diff --git a/src/task/index.ts b/src/task/index.ts
+index 950eb24674ee0f7c6d4e19b96bae9b3801dcedb5..661bd017ed147d0b297382e44ae9426f8d7d82fe 100644
+--- a/src/task/index.ts
++++ b/src/task/index.ts
+@@ -61,6 +61,7 @@ import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
+ import {
+ 	invalidModelSelectorReason,
+ 	normalizeModelSelector,
++	invalidSpawnCwdReason,
+ 	renderSubagentUserPrompt,
+ 	resolveEffectiveSubagentPolicy,
+ 	runStructuredSubagent,
+@@ -236,6 +237,8 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
+  * cannot accept. `outputSchema` is a first-class per-spawn field; stale
+  * `schema` remains an eval-only alias and is rejected.
+  */
++type WithTaskCwd = { cwd?: string };
++
+ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
+ 	if (Object.hasOwn(params, "schema")) {
+ 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
+@@ -246,6 +249,9 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string
+ 	if (batchEnabled && params.tasks !== undefined && params.model !== undefined) {
+ 		return "Top-level `model` is not part of the batch shape. Set `tasks[].model` instead.";
+ 	}
++	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "cwd")) {
++		return "Top-level `cwd` is not part of the batch shape. Set `tasks[].cwd` instead.";
++	}
+ 	if (!batchEnabled) {
+ 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
+ 		if (disallowed.length > 0) {
+@@ -325,6 +331,8 @@ function validateSpawnParams(
+ 			if (effortError) return effortError;
+ 			const modelError = validateModel(item, label, settings);
+ 			if (modelError) return modelError;
++			const cwdError = invalidSpawnCwdReason((item as WithTaskCwd | undefined)?.cwd, label);
++			if (cwdError) return cwdError;
+ 		}
+ 		const seen = new Map<string, string>();
+ 		for (const item of tasks) {
+@@ -348,7 +356,8 @@ function validateSpawnParams(
+ 	return (
+ 		validateTaskInput(params, "The call", stepsEnabled) ??
+ 		validateEffort(params.effort, "The call") ??
+-		validateModel(params, "The call", settings)
++		validateModel(params, "The call", settings) ??
++		invalidSpawnCwdReason((params as WithTaskCwd).cwd, "The call")
+ 	);
+ }
+ 
+@@ -380,6 +389,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
+ 	if ("effort" in params) item.effort = params.effort;
+ 	if ("isolated" in params) item.isolated = params.isolated;
+ 	if ("model" in params) item.model = params.model;
++	if ("cwd" in (params as WithTaskCwd)) (item as WithTaskCwd).cwd = (params as WithTaskCwd).cwd;
+ 	return [item];
+ }
+ 
+@@ -409,6 +419,13 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
+ 	} else if ("isolated" in params) {
+ 		spawn.isolated = params.isolated;
+ 	}
++	const itemCwd = (item as WithTaskCwd).cwd;
++	const paramCwd = (params as WithTaskCwd).cwd;
++	if (itemCwd !== undefined) {
++		(spawn as WithTaskCwd).cwd = itemCwd.trim();
++	} else if (paramCwd !== undefined) {
++		(spawn as WithTaskCwd).cwd = paramCwd.trim();
++	}
+ 	return spawn;
+ }
+ 
+@@ -1030,6 +1047,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			...spawnModelFields(params),
+ 			...this.#resultParams(params),
+ 			...this.#effortParams(params),
++			...((params as WithTaskCwd).cwd !== undefined ? { cwd: (params as WithTaskCwd).cwd } : {}),
+ 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+ 			blockedAgent: this.#blockedAgent,
+ 			enableLsp: this.session.enableLsp ?? true,
+@@ -1919,6 +1937,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
+ 				invokedAt: launchTiming?.invokedAt,
+ 				acquiredAt: launchTiming?.acquiredAt,
++				...((params as WithTaskCwd).cwd !== undefined ? { cwd: (params as WithTaskCwd).cwd } : {}),
+ 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+ 				blockedAgent: this.#blockedAgent,
+ 				enableLsp: this.session.enableLsp ?? true,
+diff --git a/src/task/persisted-revive.ts b/src/task/persisted-revive.ts
+index d0cd472bcf3dca78473b19828541a6aff0cd5922..9c4c16c0f3a6cdf06c03164ff0e834e126f3ba59 100644
+--- a/src/task/persisted-revive.ts
++++ b/src/task/persisted-revive.ts
+@@ -421,7 +421,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 	let session: AgentSession;
+ 	try {
+ 		({ session } = await createAgentSession({
+-			cwd: spec.root.sessionManager.getCwd(),
++			cwd: reopened.getCwd() || spec.root.sessionManager.getCwd(),
+ 			costGate: spec.costGate,
+ 			authStorage: spec.authStorage,
+ 			// Revived agents join the root session tree, so their observability
+diff --git a/src/task/structured-subagent.ts b/src/task/structured-subagent.ts
+index d2d84be1c6bc4bf001e9b3e8d9cfcf22394596d1..8e64d18cea9e963c4bbb0623c506fe27a8d216ac 100644
+--- a/src/task/structured-subagent.ts
++++ b/src/task/structured-subagent.ts
+@@ -4,10 +4,13 @@
+  * The two public frontends deliberately retain their presentation concerns, but
+  * every decision that affects what a child may run lives here.
+  */
++import { readFileSync, realpathSync } from "node:fs";
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import path from "node:path";
++import * as vcs from "@oh-my-pi/pi-natives/vcs";
+ import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
++import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+ import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+ import { modelKind } from "@oh-my-pi/pi-catalog/types";
+ import {
+@@ -24,8 +27,12 @@ import {
+ } from "../config/compaction-threshold";
+ import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
+ import type { Settings } from "../config/settings";
+-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
++import { isProviderEnabled, isUserSourceEnabled, loadCapability } from "../capability";
++import { findRepoRoot } from "../capability/fs";
++import { type Rule, ruleCapability } from "../capability/rule";
+ import type { EffectiveExtensionRoots } from "../capability/types";
++import { cfgDisabledExtensions, cfgSkills } from "../extensibility/settings";
++import { loadSkills, type Skill } from "../extensibility/skills";
+ import type { CustomTool } from "../extensibility/custom-tools/types";
+ import { sessionLocalProtocolOptions } from "../internal-urls/context";
+ import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+@@ -136,6 +143,8 @@ export interface StructuredSubagentRequest {
+ 	 */
+ 	steps?: string[];
+ 	agent?: string;
++	/** Target directory inside the workspace or a registered sibling git worktree. */
++	cwd?: string;
+ 	/**
+ 	 * Model chosen by host code (SDK callers, `omp cleanse --model`).
+ 	 * Not gated by `task.perCallModel`.
+@@ -229,8 +238,10 @@ export interface EffectiveSubagentPolicy {
+ 	applyChanges: boolean;
+ 	enableLsp: boolean;
+ 	enableIrc: boolean;
+-	/** Caller `effort` hint to apply; dropped when the agent's level comes from the user's `^model:level` tag. */
++	/** Caller effort is ignored when an explicit user model tag already owns it. */
+ 	effort?: TaskEffort;
++	resolvedCwd?: string;
++	boundWorktree?: string;
+ }
+ 
+ /** Settled child execution plus data needed by the frontends' own rendering. */
+@@ -498,6 +509,18 @@ function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRo
+ 	return promise;
+ }
+ 
++export function invalidSpawnCwdReason(cwd: unknown, label: string): string | undefined {
++	if (cwd === undefined) return undefined;
++	if (typeof cwd !== "string" || !cwd.trim()) {
++		return `${label} \`cwd\` must be a non-empty filesystem path.`;
++	}
++	const trimmed = cwd.trim();
++	if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) || trimmed.startsWith("@") || trimmed.startsWith(":")) {
++		return `${label} \`cwd\` must be a local filesystem path, not a URL or alias.`;
++	}
++	return undefined;
++}
++
+ /**
+  * Resolve every policy shared by task and eval before allocating artifacts or
+  * dispatching work. Callers translate {@link StructuredSubagentError} into
+@@ -516,7 +539,16 @@ export async function resolveEffectiveSubagentPolicy(
+ 	assertPlanControlsAllowed(request, planMode);
+ 	assertDepthAndSpawnAllowed(request, agentName);
+ 
+-	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
++	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
++	const isIsolated = request.isolation?.requested === true;
++	if (isIsolated && !isolationEnabled) {
++		throw new StructuredSubagentError("preflight", "Subagent isolated execution requires task.isolation.enabled; it is currently false.");
++	}
++	const cwdBinding = await resolveSpawnWorkingDirectory(request, isIsolated);
++	const discovery = await discoverAgentsShared(
++		cwdBinding.resolvedCwd ?? request.session.cwd,
++		request.session.effectiveExtensionRoots?.(),
++	);
+ 	const sessionAgents = request.session.getSessionAgents?.() ?? [];
+ 	const agents = [...discovery.agents, ...sessionAgents];
+ 	const agent = getAgent(agents, agentName);
+@@ -622,14 +654,6 @@ export async function resolveEffectiveSubagentPolicy(
+ 	const { patterns: modelOverride, role: modelRole } = perCallModelGrants
+ 		? { patterns: [(perCallSelector as string).trim()], role: undefined }
+ 		: resolveAgentModelSelection(modelResolution);
+-	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
+-	const isIsolated = request.isolation?.requested === true;
+-	if (isIsolated && !isolationEnabled) {
+-		throw new StructuredSubagentError(
+-			"preflight",
+-			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
+-		);
+-	}
+ 	return {
+ 		discovery,
+ 		agentName,
+@@ -657,6 +681,8 @@ export async function resolveEffectiveSubagentPolicy(
+ 				(request.session.enableIrc !== false &&
+ 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+ 		effort: userTaggedEffort ? undefined : request.effort,
++		resolvedCwd: cwdBinding.resolvedCwd,
++		boundWorktree: cwdBinding.boundWorktree,
+ 	};
+ }
+ 
+@@ -747,11 +773,360 @@ async function refreshSkillsForAutoload(session: ToolSession, agent: AgentDefini
+ 	await session.refreshSkills();
+ }
+ 
++const MAX_TARGET_REPO_DIRS = 8;
++const MAX_EXISTING_ANCESTOR_HOPS = 4;
++
++function stripTrailingPathNoise(rawPath: string): string {
++	return rawPath
++		.replace(/[.,;:!?)'"\]]+$/, "")
++		.replace(/:\d+(?::\d+)?$/, "")
++		.replace(/[.,;:!?)'"\]]+$/, "");
++}
++
++function extractReferencedPaths(cwd: string, ...texts: Array<string | undefined>): string[] {
++	const results: string[] = [];
++	const seen = new Set<string>();
++	const homeDir = os.homedir();
++	const pushCandidate = (candidate: string | undefined): void => {
++		if (!candidate) return;
++		const cleaned = stripTrailingPathNoise(candidate.trim());
++		if (!cleaned || cleaned === "/" || !cleaned.includes("/")) return;
++		const resolved = path.resolve(cwd, cleaned);
++		if (seen.has(resolved)) return;
++		seen.add(resolved);
++		results.push(resolved);
++	};
++
++	for (const text of texts) {
++		if (!text) continue;
++		for (const match of text.matchAll(/file:\/\/(\/[^)\s"'`<>#\r\n]+)/g)) {
++			try {
++				pushCandidate(decodeURIComponent(match[1]!));
++			} catch {
++				pushCandidate(match[1]);
++			}
++		}
++		for (const match of text.matchAll(/(?:^|[\s(`"'\[,=])(~\/[A-Za-z0-9._\-\/@+]+)/g)) {
++			pushCandidate(path.join(homeDir, match[1]!.slice(2)));
++		}
++		for (const match of text.matchAll(/(?:^|[\s(`"'\[,=])(\/[A-Za-z0-9._\-\/@+]+)/g)) {
++			pushCandidate(match[1]);
++		}
++		for (const match of text.matchAll(/(?:^|[\s(`"'\[,=])(\.\.?\/[A-Za-z0-9._\-\/@+]+)/g)) {
++			pushCandidate(match[1]);
++		}
++	}
++	return results;
++}
++
++async function resolveCanonicalPath(targetPath: string): Promise<string> {
++	const resolved = path.resolve(targetPath);
++	try {
++		return await fs.realpath(resolved);
++	} catch {
++		return resolved;
++	}
++}
++
++function isWithinOrEqual(parentDir: string, childPath: string): boolean {
++	const rel = path.relative(parentDir, childPath);
++	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
++}
++
++function isLcpCheckoutRoot(root: string): { commonDir: string } | undefined {
++	try {
++		const canonicalRoot = realpathSync.native(root);
++		const launcher = JSON.parse(readFileSync(path.join(canonicalRoot, "packages/launcher/package.json"), "utf8"));
++		const guard = JSON.parse(readFileSync(path.join(canonicalRoot, "packages/risk-guard/package.json"), "utf8"));
++		if (launcher?.name !== "@lcp/launcher" || guard?.name !== "@lcp/risk-guard") return undefined;
++		const git = vcs.gitInfo(canonicalRoot);
++		if (!git || realpathSync.native(git.repoRoot) !== canonicalRoot) return undefined;
++		return { commonDir: realpathSync.native(git.commonDir) };
++	} catch {
++		return undefined;
++	}
++}
++
++function discoverLcpProductionBoundaryForSubagent(): { root?: string; sourceCommonDir?: string } {
++	let sourceCommonDir: string | undefined;
++	let cursor = path.resolve(import.meta.dir);
++	for (let hop = 0; hop < 8; hop++) {
++		const info = isLcpCheckoutRoot(cursor);
++		if (info) {
++			sourceCommonDir = info.commonDir;
++			break;
++		}
++		const parent = path.dirname(cursor);
++		if (parent === cursor) break;
++		cursor = parent;
++	}
++	const entryPath = process.env.LCP_PRODUCTION_ENTRY_FOR_TESTS?.trim() || path.join(os.homedir(), ".local/bin/lcp");
++	try {
++		const entry = realpathSync.native(entryPath);
++		const root = realpathSync.native(path.dirname(path.dirname(entry)));
++		if (realpathSync.native(path.join(root, "bin/lcp")) !== entry) return { sourceCommonDir };
++		if (!isLcpCheckoutRoot(root)) return { sourceCommonDir };
++		return { root, sourceCommonDir };
++	} catch {
++		return { sourceCommonDir };
++	}
++}
++
++async function resolveSpawnWorkingDirectory(
++	request: StructuredSubagentRequest,
++	isIsolated: boolean,
++): Promise<{ resolvedCwd?: string; boundWorktree?: string }> {
++	if (request.cwd === undefined) return {};
++	if (isIsolated) {
++		throw new StructuredSubagentError(
++			"preflight",
++			"`cwd` cannot be combined with `isolated: true`; pass an existing directory or let isolation create a temporary worktree.",
++		);
++	}
++	const syntaxProblem = invalidSpawnCwdReason(request.cwd, "Subagent");
++	if (syntaxProblem) {
++		throw new StructuredSubagentError("preflight", syntaxProblem);
++	}
++	const raw = request.cwd.trim();
++	const candidate = path.resolve(request.session.cwd, raw);
++	let stat: Awaited<ReturnType<typeof fs.stat>>;
++	try {
++		stat = await fs.stat(candidate);
++	} catch {
++		throw new StructuredSubagentError("preflight", `Subagent \`cwd\` does not exist: ${raw}`);
++	}
++	if (!stat.isDirectory()) {
++		throw new StructuredSubagentError("preflight", `Subagent \`cwd\` must be an existing directory: ${raw}`);
++	}
++	const canonicalTarget = await resolveCanonicalPath(candidate);
++	const canonicalSessionCwd = await resolveCanonicalPath(request.session.cwd);
++	const production = discoverLcpProductionBoundaryForSubagent();
++	if (production.root && isWithinOrEqual(production.root, canonicalTarget)) {
++		throw new StructuredSubagentError(
++			"preflight",
++			`Subagent \`cwd\` refuses the protected LCP production checkout: ${canonicalTarget}`,
++		);
++	}
++	const targetGit = vcs.gitInfo(canonicalTarget);
++	const targetRepoRoot = targetGit ? await resolveCanonicalPath(targetGit.repoRoot) : undefined;
++	const targetCommonDir = targetGit ? await resolveCanonicalPath(targetGit.commonDir) : undefined;
++	if (targetGit && targetCommonDir) {
++		const targetGitDir = await resolveCanonicalPath(targetGit.gitDir);
++		const targetGitEntry = await resolveCanonicalPath(targetGit.gitEntryPath);
++		if (
++			isWithinOrEqual(targetCommonDir, canonicalTarget) ||
++			isWithinOrEqual(targetGitDir, canonicalTarget) ||
++			canonicalTarget === targetGitEntry
++		) {
++			throw new StructuredSubagentError(
++				"preflight",
++				`Subagent \`cwd\` cannot point inside Git metadata (${canonicalTarget}).`,
++			);
++		}
++	}
++	const sessionGit = vcs.gitInfo(canonicalSessionCwd);
++	const sessionRepoRoot = sessionGit ? await resolveCanonicalPath(sessionGit.repoRoot) : undefined;
++	const workspaceRoots = await Promise.all(
++		[request.session.cwd, ...(request.session.additionalDirectories ?? [])].map(resolveCanonicalPath),
++	);
++	if (workspaceRoots.some(root => isWithinOrEqual(root, canonicalTarget))) {
++		if (canonicalTarget === canonicalSessionCwd) return {};
++		return {
++			resolvedCwd: canonicalTarget,
++			boundWorktree: targetRepoRoot && targetRepoRoot !== sessionRepoRoot ? targetRepoRoot : undefined,
++		};
++	}
++	if (!targetGit || !targetRepoRoot || !targetCommonDir) {
++		throw new StructuredSubagentError(
++			"preflight",
++			`Subagent \`cwd\` must be inside the workspace or an existing registered git worktree of the same repository: ${canonicalTarget}`,
++		);
++	}
++	if (!production.root && production.sourceCommonDir && targetCommonDir === production.sourceCommonDir) {
++		throw new StructuredSubagentError(
++			"preflight",
++			`Subagent \`cwd\` cannot verify the LCP production boundary while delegating into sibling worktree: ${canonicalTarget}`,
++		);
++	}
++	for (const wsRoot of workspaceRoots) {
++		const repo = vcs.git(wsRoot);
++		const info = repo?.info();
++		if (!repo || !info) continue;
++		const wsCommonDir = await resolveCanonicalPath(info.commonDir);
++		if (wsCommonDir !== targetCommonDir) continue;
++		const worktrees = await repo.worktrees(request.signal);
++		for (const entry of worktrees) {
++			const wtRoot = await resolveCanonicalPath(entry.path);
++			if (wtRoot !== targetRepoRoot || !isWithinOrEqual(wtRoot, canonicalTarget)) continue;
++			const fresh = vcs.gitInfo(wtRoot);
++			if (!fresh) continue;
++			if (
++				(await resolveCanonicalPath(fresh.repoRoot)) === wtRoot &&
++				(await resolveCanonicalPath(fresh.commonDir)) === wsCommonDir
++			) {
++				return {
++					resolvedCwd: canonicalTarget,
++					boundWorktree: wtRoot !== sessionRepoRoot ? wtRoot : undefined,
++				};
++			}
++		}
++	}
++	throw new StructuredSubagentError(
++		"preflight",
++		`Subagent \`cwd\` must be inside the workspace or an existing registered git worktree of the same repository: ${canonicalTarget}`,
++	);
++}
++
++async function resolveExistingDir(candidatePath: string, homeCanonical: string): Promise<string | null> {
++	let current = path.resolve(candidatePath);
++	for (let hop = 0; hop <= MAX_EXISTING_ANCESTOR_HOPS; hop++) {
++		const canonicalCurrent = await resolveCanonicalPath(current);
++		if (canonicalCurrent === "/" || canonicalCurrent === homeCanonical) {
++			return null;
++		}
++		try {
++			const stat = await fs.stat(current);
++			return stat.isDirectory() ? current : path.dirname(current);
++		} catch {
++			const parent = path.dirname(current);
++			if (parent === current) return null;
++			current = parent;
++		}
++	}
++	return null;
++}
++
++function dedupeDeepestDirs(dirs: readonly string[]): string[] {
++	const kept: string[] = [];
++	const sorted = [...dirs].sort((a, b) => b.length - a.length);
++	for (const candidate of sorted) {
++		if (kept.some(deeper => isWithinOrEqual(candidate, deeper))) continue;
++		kept.push(candidate);
++	}
++	return dirs.filter(dir => kept.includes(dir)).slice(0, MAX_TARGET_REPO_DIRS);
++}
++
++async function augmentSubagentRepoContext(
++	request: StructuredSubagentRequest,
++	policy: EffectiveSubagentPolicy,
++	baseOptions: ExecutorOptions,
++): Promise<void> {
++	const { session } = request;
++	const candidates = extractReferencedPaths(baseOptions.cwd, request.context, request.assignment);
++	if (candidates.length === 0) return;
++
++	let boundCommonDir: string | undefined;
++	if (baseOptions.boundWorktree) {
++		const boundGit = vcs.gitInfo(baseOptions.boundWorktree);
++		if (boundGit) boundCommonDir = await resolveCanonicalPath(boundGit.commonDir);
++	}
++
++	const home = os.homedir();
++	const homeCanonical = await resolveCanonicalPath(home);
++	const excludedConfigRoots = await Promise.all(
++		[getAgentDir(), path.join(home, ".omp"), path.join(home, ".claude"), path.join(home, ".gemini")].map(
++			resolveCanonicalPath,
++		),
++	);
++
++	const coveredRepoRoots = new Set<string>();
++	for (const coveredDir of [baseOptions.cwd, ...(baseOptions.additionalDirectories ?? [])]) {
++		const repoRoot = await findRepoRoot(coveredDir);
++		if (repoRoot) {
++			coveredRepoRoots.add(await resolveCanonicalPath(repoRoot));
++		}
++	}
++
++	const uncoveredDirs: string[] = [];
++	const seenTargetDirs = new Set<string>();
++	for (const candidate of candidates) {
++		const existingDir = await resolveExistingDir(candidate, homeCanonical);
++		if (!existingDir) continue;
++		const repoRoot = await findRepoRoot(existingDir);
++		if (!repoRoot) continue;
++		const canonicalRepoRoot = await resolveCanonicalPath(repoRoot);
++		if (
++			canonicalRepoRoot === "/" ||
++			canonicalRepoRoot === homeCanonical ||
++			excludedConfigRoots.some(cfgRoot => isWithinOrEqual(cfgRoot, canonicalRepoRoot))
++		) {
++			continue;
++		}
++		if (coveredRepoRoots.has(canonicalRepoRoot)) continue;
++		if (boundCommonDir) {
++			const candGit = vcs.gitInfo(canonicalRepoRoot);
++			if (candGit && (await resolveCanonicalPath(candGit.commonDir)) === boundCommonDir) continue;
++		}
++		const canonicalDir = await resolveCanonicalPath(existingDir);
++		if (seenTargetDirs.has(canonicalDir)) continue;
++		seenTargetDirs.add(canonicalDir);
++		uncoveredDirs.push(existingDir);
++	}
++
++	const targetDirs = dedupeDeepestDirs(uncoveredDirs);
++	if (targetDirs.length === 0) return;
++
++	const existingAdditional = baseOptions.additionalDirectories ?? [];
++	const seenAdditional = new Set(existingAdditional.map(dir => path.resolve(dir)));
++	const addedDirs: string[] = [];
++	for (const dir of targetDirs) {
++		const resolved = path.resolve(dir);
++		if (seenAdditional.has(resolved)) continue;
++		seenAdditional.add(resolved);
++		addedDirs.push(resolved);
++	}
++	if (addedDirs.length === 0) return;
++
++	baseOptions.additionalDirectories = [...existingAdditional, ...addedDirs];
++
++	if (baseOptions.skills !== undefined) {
++		const skillsResult = await loadSkills({
++			...cfgSkills.get(session.settings),
++			cwd: addedDirs[0],
++			additionalDirectories: addedDirs.slice(1),
++			disabledExtensions: cfgDisabledExtensions.get(session.settings),
++			extensionRoots: session.effectiveExtensionRoots?.(),
++		});
++		const seenSkillPaths = new Set(baseOptions.skills.map(skill => path.resolve(skill.filePath)));
++		const mergedSkills: Skill[] = [...baseOptions.skills];
++		for (const skill of skillsResult.skills) {
++			if (skill._source?.level !== "project" && !skill.source.endsWith(":project")) continue;
++			const resolvedSkillPath = path.resolve(skill.filePath);
++			if (seenSkillPaths.has(resolvedSkillPath)) continue;
++			seenSkillPaths.add(resolvedSkillPath);
++			mergedSkills.push(skill);
++		}
++		baseOptions.skills = mergedSkills;
++		if (policy.agent.autoloadSkills?.length) {
++			baseOptions.autoloadSkills = policy.agent.autoloadSkills
++				.map(name => mergedSkills.find(skill => skill.name === name))
++				.filter((skill): skill is Skill => skill !== undefined);
++		}
++	}
++
++	if (baseOptions.rules !== undefined) {
++		const seenRulePaths = new Set(baseOptions.rules.map(rule => path.resolve(rule.path)));
++		const mergedRules: Rule[] = [...baseOptions.rules];
++		for (const dir of addedDirs) {
++			const extraRules = await loadCapability<Rule>(ruleCapability.id, { cwd: dir });
++			for (const rule of extraRules.items) {
++				if (rule._source.level !== "project") continue;
++				const resolvedRulePath = path.resolve(rule.path);
++				if (seenRulePaths.has(resolvedRulePath)) continue;
++				seenRulePaths.add(resolvedRulePath);
++				mergedRules.push(rule);
++			}
++		}
++		baseOptions.rules = mergedRules;
++	}
++}
++
+ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
+-	const skills = [...(session.skills ?? [])];
+-	const autoloadSkills = agent.autoloadSkills?.length
+-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
+-		: [];
++	const skills = session.skills !== undefined ? [...session.skills] : undefined;
++	const autoloadSkills =
++		agent.autoloadSkills?.length && skills !== undefined
++			? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
++			: [];
+ 	return { skills, autoloadSkills };
+ }
+ 
+@@ -767,10 +1142,13 @@ function buildExecutorOptions(
+ 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+ 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+ 	const steps = request.steps?.length ? renderStepPrompts(request.steps, policy.structured) : undefined;
++	const targetCwd = policy.resolvedCwd ?? session.cwd;
++	const switchedCwd = policy.resolvedCwd !== undefined && path.resolve(policy.resolvedCwd) !== path.resolve(session.cwd);
+ 	return {
+-		cwd: session.cwd,
++		cwd: targetCwd,
+ 		costGate: session.costGate,
+-		additionalDirectories: session.additionalDirectories,
++		additionalDirectories: policy.boundWorktree !== undefined ? [] : session.additionalDirectories,
++		boundWorktree: policy.boundWorktree,
+ 		getApiKey: session.getApiKey,
+ 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+ 		agent: policy.effectiveAgent,
+@@ -834,13 +1212,13 @@ function buildExecutorOptions(
+ 		enableMCP,
+ 		customTools: request.customTools,
+ 		workPoolYieldItems: request.workPoolYieldItems,
+-		contextFiles: session.contextFiles,
++		contextFiles: switchedCwd ? undefined : session.contextFiles,
+ 		noContextFiles: session.noContextFiles,
+-		skills,
++		skills: switchedCwd ? undefined : skills,
+ 		autoloadSkills,
+-		workspaceTree: session.workspaceTree,
++		workspaceTree: switchedCwd ? undefined : session.workspaceTree,
+ 		promptTemplates: session.promptTemplates,
+-		rules: session.rules,
++		rules: switchedCwd ? undefined : session.rules,
+ 		// Root policy and module paths have separate jobs: the live policy drives
+ 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
+ 		// parent-bound extension instances while constructing the child.
+@@ -1031,8 +1409,34 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+ 			...request.identity,
+ 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
+ 		});
+-		await refreshSkillsForAutoload(request.session, policy.agent);
++		const switchedCwd =
++			policy.resolvedCwd !== undefined && path.resolve(policy.resolvedCwd) !== path.resolve(request.session.cwd);
++		if (!switchedCwd) {
++			await refreshSkillsForAutoload(request.session, policy.agent);
++		}
+ 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
++		if (switchedCwd && policy.agent.autoloadSkills?.length) {
++			const targetSkills = await loadSkills({
++				...cfgSkills.get(request.session.settings),
++				cwd: policy.resolvedCwd!,
++				additionalDirectories: baseOptions.additionalDirectories ?? [],
++				disabledExtensions: cfgDisabledExtensions.get(request.session.settings),
++				extensionRoots: request.session.effectiveExtensionRoots?.(),
++			});
++			baseOptions.autoloadSkills = policy.agent.autoloadSkills
++				.map(
++					name =>
++						targetSkills.skills.find(skill => skill.name === name) ??
++						baseOptions.autoloadSkills?.find(
++							skill =>
++								skill.name === name &&
++								skill._source?.level !== "project" &&
++								!skill.source.endsWith(":project"),
++						),
++				)
++				.filter((skill): skill is Skill => skill !== undefined);
++		}
++		await augmentSubagentRepoContext(request, policy, baseOptions);
+ 		baseOptions.onCleanupDeferred = completion => {
+ 			deferredCleanup = completion;
+ 		};
+diff --git a/src/task/types.ts b/src/task/types.ts
+index 9dad59b049200d51a459bb381817e3838e50b0d7..bf7df714894c55194bc4feee90eb0d444e27668c 100644
+--- a/src/task/types.ts
++++ b/src/task/types.ts
+@@ -70,6 +70,8 @@ export const taskItemSchema = type({
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"tools?": "string[]",
++	"model?": "string",
++	"cwd?": "string",
+ 	"+": "delete",
+ });
+ const taskItemSchemaIsolated = type({
+@@ -80,6 +82,8 @@ const taskItemSchemaIsolated = type({
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"tools?": "string[]",
++	"model?": "string",
++	"cwd?": "string",
+ 	"isolated?": "boolean",
+ 	"+": "delete",
+ });
+@@ -92,6 +96,8 @@ export const taskSchema = type({
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"tools?": "string[]",
++	"model?": "string",
++	"cwd?": "string",
+ 	"isolated?": "boolean",
+ 	"+": "delete",
+ });
+@@ -103,14 +109,21 @@ const taskSchemaNoIsolation = type({
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"tools?": "string[]",
++	"model?": "string",
++	"cwd?": "string",
+ 	"+": "delete",
+ });
+ function guardBatchAgent(schema: BaseType): BaseType {
+-	// Inspect the input before undeclared-key deletion can erase the requested agent.
++	// Inspect the input before undeclared-key deletion can erase the requested agent/cwd.
+ 	return schema.in
+ 		.narrow((params, ctx) => {
+-			if (params !== null && typeof params === "object" && Object.hasOwn(params, "agent")) {
+-				return ctx.reject("a batch with `agent` specified in `tasks[].agent`, not at the top level");
++			if (params !== null && typeof params === "object") {
++				if (Object.hasOwn(params, "agent")) {
++					return ctx.reject("a batch with `agent` specified in `tasks[].agent`, not at the top level");
++				}
++				if (Object.hasOwn(params, "cwd")) {
++					return ctx.reject("a batch with `cwd` specified in `tasks[].cwd`, not at the top level");
++				}
+ 			}
+ 			return true;
+ 		})
+@@ -182,6 +195,7 @@ function createTaskSchema(options: {
+ 				...schemaFields,
+ 				...toolsField,
+ 				...gatedFields,
++				"cwd?": "string",
+ 				"isolated?": "boolean",
+ 				"+": "delete",
+ 			});
+@@ -202,6 +216,7 @@ function createTaskSchema(options: {
+ 			...schemaFields,
+ 			...toolsField,
+ 			...gatedFields,
++			"cwd?": "string",
+ 			"+": "delete",
+ 		});
+ 		return guardBatchAgent(
+@@ -222,6 +237,7 @@ function createTaskSchema(options: {
+ 			...schemaFields,
+ 			...toolsField,
+ 			...gatedFields,
++			"cwd?": "string",
+ 			"isolated?": "boolean",
+ 			"+": "delete",
+ 		});
+@@ -235,6 +251,7 @@ function createTaskSchema(options: {
+ 		...schemaFields,
+ 		...toolsField,
+ 		...gatedFields,
++		"cwd?": "string",
+ 		"+": "delete",
+ 	});
+ }

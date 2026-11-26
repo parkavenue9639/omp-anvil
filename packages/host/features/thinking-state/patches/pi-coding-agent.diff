@@ -1,0 +1,137 @@
+diff --git a/src/extensibility/extensions/loader.ts b/src/extensibility/extensions/loader.ts
+index 93ee099ae466b32e9625d82019a4909e2c7b1890..2416e6fcdb3184262061cf130d1284a73f843e91 100644
+--- a/src/extensibility/extensions/loader.ts
++++ b/src/extensibility/extensions/loader.ts
+@@ -182,6 +182,8 @@ export class ExtensionRuntime implements IExtensionRuntime {
+ 		throw new ExtensionRuntimeNotInitializedError();
+ 	}
+ 
++	getThinkingState: ExtensionAPI["getThinkingState"];
++
+ 	setThinkingLevel(): void {
+ 		throw new ExtensionRuntimeNotInitializedError();
+ 	}
+@@ -432,6 +434,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+ 		return this.runtime.getThinkingLevel();
+ 	}
+ 
++	get getThinkingState(): ExtensionAPI["getThinkingState"] {
++		return this.runtime.getThinkingState;
++	}
++
+ 	setThinkingLevel(level: ThinkingLevel, persist?: boolean): void {
+ 		this.runtime.setThinkingLevel(level, persist);
+ 	}
+diff --git a/src/extensibility/extensions/runner.ts b/src/extensibility/extensions/runner.ts
+index 6f9e489a3e4f503a0f3006e5bc41efc901e9a2a7..c5104cda4570d112c33002a7163eb63a3824b51c 100644
+--- a/src/extensibility/extensions/runner.ts
++++ b/src/extensibility/extensions/runner.ts
+@@ -952,6 +952,7 @@ export class ExtensionRunner {
+ 		this.runtime.setModel = actions.setModel;
+ 		this.runtime.setModelWhenIdle = actions.setModelWhenIdle;
+ 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
++		this.runtime.getThinkingState = actions.getThinkingState;
+ 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
+ 		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
+ 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
+diff --git a/src/extensibility/extensions/types.ts b/src/extensibility/extensions/types.ts
+index 381f695580a58a5c13aa056e6e5eff7fec493ab5..cb0ea5768ad2d515a05550ee87cff397cbcc43af 100644
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -2313,6 +2313,9 @@ export interface ExtensionAPI {
+ 	/** Get current thinking level. */
+ 	getThinkingLevel(): ThinkingLevel | undefined;
+ 
++	/** Configured selector and the last per-turn auto resolution, when supported. */
++	getThinkingState?(): { configured?: ConfiguredThinkingLevel; autoResolved?: string };
++
+ 	/** Set thinking level for the current session. */
+ 	setThinkingLevel(level: ThinkingLevel): void;
+ 
+@@ -2578,6 +2581,7 @@ export interface ExtensionActions {
+ 	setModel: SetModelHandler;
+ 	setModelWhenIdle?: SetModelWhenIdleHandler;
+ 	getThinkingLevel: GetThinkingLevelHandler;
++	getThinkingState?: ExtensionAPI["getThinkingState"];
+ 	setThinkingLevel: SetThinkingLevelHandler;
+ 	getServiceTiers?: GetServiceTiersHandler;
+ 	setServiceTier?: SetServiceTierHandler;
+diff --git a/src/modes/acp/acp-agent.ts b/src/modes/acp/acp-agent.ts
+index a7f59a5c4898117a2dc09b32c21c3d15760e6a77..c7eded3ff49ce6b5936578923eab8ef891c2df03 100644
+--- a/src/modes/acp/acp-agent.ts
++++ b/src/modes/acp/acp-agent.ts
+@@ -3344,6 +3344,7 @@ export class AcpAgent implements Agent {
+ 				},
+ 				setModelWhenIdle: (model, options) => record.session.setModelWhenIdle(model, options),
+ 				getThinkingLevel: () => record.session.thinkingLevel,
++				getThinkingState: () => ({ configured: record.session.configuredThinkingLevel(), autoResolved: record.session.autoResolvedThinkingLevel() }),
+ 				setThinkingLevel: level => record.session.setThinkingLevel(level),
+ 				getServiceTiers: () => record.session.serviceTierByFamily,
+ 				setServiceTier: (family, tier) => record.session.setServiceTierFamily(family, tier),
+diff --git a/src/modes/controllers/extension-ui-controller.ts b/src/modes/controllers/extension-ui-controller.ts
+index 35e682c592ccf1e6c3aba240ce7222c68b538956..fc7c247598bd64cad5dd826ffa2f9848b106d245 100644
+--- a/src/modes/controllers/extension-ui-controller.ts
++++ b/src/modes/controllers/extension-ui-controller.ts
+@@ -292,6 +292,7 @@ export class ExtensionUiController {
+ 			},
+ 			setModelWhenIdle: (model, options) => this.ctx.session.setModelWhenIdle(model, options),
+ 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
++			getThinkingState: () => ({ configured: this.ctx.session.configuredThinkingLevel(), autoResolved: this.ctx.session.autoResolvedThinkingLevel() }),
+ 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
+ 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
+ 			setServiceTier: (family, tier) => this.ctx.session.setServiceTierFamily(family, tier),
+@@ -518,6 +519,7 @@ export class ExtensionUiController {
+ 			},
+ 			setModelWhenIdle: (model, options) => this.ctx.session.setModelWhenIdle(model, options),
+ 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
++			getThinkingState: () => ({ configured: this.ctx.session.configuredThinkingLevel(), autoResolved: this.ctx.session.autoResolvedThinkingLevel() }),
+ 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
+ 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
+ 			setServiceTier: (family, tier) => this.ctx.session.setServiceTierFamily(family, tier),
+diff --git a/src/modes/runtime-init.ts b/src/modes/runtime-init.ts
+index 5a1b0b7a30675dcd3b19333bb0ccb47935adcd3c..7ca16e403fee0d2f10d1fa05d90dad9354b3c7b0 100644
+--- a/src/modes/runtime-init.ts
++++ b/src/modes/runtime-init.ts
+@@ -132,6 +132,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
+ 			setModel: (model, role) => runExtensionSetModel(session, model, role),
+ 			setModelWhenIdle: (model, options) => session.setModelWhenIdle(model, options),
+ 			getThinkingLevel: () => session.thinkingLevel,
++			getThinkingState: () => ({ configured: session.configuredThinkingLevel(), autoResolved: session.autoResolvedThinkingLevel() }),
+ 			setThinkingLevel: level => session.setThinkingLevel(level),
+ 			getServiceTiers: () => session.serviceTierByFamily,
+ 			setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
+diff --git a/src/sdk.ts b/src/sdk.ts
+index 4517e0634b9cd4e91c523a45dabf2d99765e3d62..2a99f812652342f08622c666cf552c93fbc3baf0 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -2437,7 +2437,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 	// so the final model's own defaults aren't masked by an earlier fallback
+ 	// model's.
+ 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
+-		let level = startupCandidateThinkingLevel ?? options.thinkingLevel;
++		let level = options.thinkingLevel ?? startupCandidateThinkingLevel;
+ 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
+ 			level =
+ 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
+@@ -5384,17 +5384,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				sessionManager.appendModelChange(formatModelStringWithRouting(model), installedModelRole, false,
+ 					getRetryFallbackRole(settings, installedModelRole));
+ 			}
++			if (options.thinkingLevel !== undefined) {
++				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, autoThinking ? AUTO_THINKING : effectiveThinkingLevel);
++			}
+ 		} else {
+ 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
+ 			if (model) {
+ 				sessionManager.appendModelChange(formatModelStringWithRouting(model), installedModelRole, false,
+ 					getRetryFallbackRole(settings, installedModelRole));
+ 			}
+-			if (!autoThinking) {
+-				// Do not write the `auto` selector before the first turn resolves; auto
+-				// classification persists its concrete effort once a real user turn runs.
+-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+-			}
++			sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, autoThinking ? AUTO_THINKING : effectiveThinkingLevel);
+ 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
+ 				sessionManager.appendServiceTierChange(
+ 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,

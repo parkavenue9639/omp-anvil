@@ -1,0 +1,50 @@
+diff --git a/src/chat/read-tool-group.ts b/src/chat/read-tool-group.ts
+index 9d5ccaad34973dd08110d6226dcc8de688ba2e61..52c8b505f078984607ac7e6da0bca836571fef15 100644
+--- a/src/chat/read-tool-group.ts
++++ b/src/chat/read-tool-group.ts
+@@ -1011,14 +1011,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
+ 						preview: { lines: COLLAPSED_PREVIEW_LINES },
+ 					},
+ 					[
+-						previewsMarkdown(entry)
+-							? md(entry.contentText ?? "")
+-							: code(entry.contentText ?? "", {
+-									path: split.path,
+-									start: entry.codeStartLine,
+-									numbers: true,
+-									wrap: true,
+-								}),
++						...(previewsMarkdown(entry)
++							? [md(entry.contentText ?? "")]
++							: readContentCode(
++									entry.contentText ?? "",
++									entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
++									entry.codeLineNumbers,
++									split.path,
++								)),
+ 					],
+ 					`p${entry.toolCallId}`,
+ 				),
+diff --git a/src/tools/read.ts b/src/tools/read.ts
+index 6aedc7543a8a37bd64c560fb7cd310330d871b9a..3be975e9d76bf059b18f6c9924c78e535b6352f3 100644
+--- a/src/tools/read.ts
++++ b/src/tools/read.ts
+@@ -16,7 +16,7 @@ import type {
+ 	ToolActivitySummary,
+ 	ToolRenderer,
+ } from "./renderer";
+-import { ansi, compact, md } from "../native/describe";
++import { ansi, compact, md, span, text } from "../native/describe";
+ import { base64ImageNode, nativeMediaNode, readMediaPath } from "../native/blobs";
+ import type { NativeChild, NativeNode } from "../native/node";
+ import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-view";
+@@ -531,6 +531,9 @@ export function readContentCode(
+ 	numbers: readonly (number | null)[] | undefined,
+ 	path: string | undefined,
+ ): NativeNode[] {
++	// Tern 0.9.9 panics when mounting a code node whose text is empty.
++	// Keep the file's existing head/link, but describe empty content as text.
++	if (content.length === 0) return [text([span("(empty)", "muted")])];
+ 	const lines = content.split("\n");
+ 	const block = numberedCode(
+ 		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),

@@ -1,0 +1,199 @@
+diff --git a/dist/types/tools/renderer.d.ts b/dist/types/tools/renderer.d.ts
+index fb45b6943e175708cdeafd61c49bbec60a3aca14..406f610df91f07d8381e3b2a02f941b86ced6554 100644
+--- a/dist/types/tools/renderer.d.ts
++++ b/dist/types/tools/renderer.d.ts
+@@ -3,6 +3,7 @@
+  * transcript components. Built-in renderers live beside this file; the
+  * coding-agent tools implement the matching `*Details` payloads.
+  */
++import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+ import type { ShellTrace, ShellVizPresentation, TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+ import type { NativeChild } from "../native/node.js";
+ import type { Component } from "../tui.js";
+@@ -62,6 +63,13 @@ export interface ToolRenderResult<TDetails = unknown> {
+     details?: TDetails;
+     isError?: boolean;
+ }
++/** A human action on a settled tool card, including replayed history. */
++export interface ToolResultActionEvent<TArgs = unknown, TDetails = unknown> {
++    action: string;
++    toolCallId: string;
++    args: TArgs;
++    result: AgentToolResult<TDetails>;
++}
+ /**
+  * A fence a tool call draws under its card, as assistant Markdown draws that
+  * fence. Any fence language may be named (`svg`, `mermaid`, `obj`); the
+@@ -169,6 +177,8 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
+     /** Semantic result view for TSP terminals; merged with the call view when {@link mergeCallAndResult}. */
+     describeResult?(result: ToolRenderResult<TDetails>, options: RenderResultContextOptions, args?: TArgs): NativeToolView | undefined;
+     mergeCallAndResult?: boolean;
++    /** Host UI only: never invoked by a model tool call or for a partial result. */
++    onResultAction?(event: ToolResultActionEvent<TArgs, TDetails>): void | Promise<void>;
+     /**
+      * The fence a call draws under its card (a `.svg` being written, as its
+      * image): growing while the args stream, closed once they are final; none
+diff --git a/src/chat/tool-execution.ts b/src/chat/tool-execution.ts
+index 16f9e32991b842f0e46cb1248d28386189d9bc1e..a082281cf82608e3ea155a21a7955d4b72564b94 100644
+--- a/src/chat/tool-execution.ts
++++ b/src/chat/tool-execution.ts
+@@ -5,7 +5,7 @@ import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-t
+ import { ShellVisualizer } from "../apps/shell-visualizer";
+ import { chatTranscriptDisplayPreferences } from "./display-preferences";
+ import type { ImageContent } from "@oh-my-pi/pi-ai";
+-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
++import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+ import { Box } from "../components/box";
+ import {
+ 	onSpinnerIntervalChange,
+@@ -139,7 +139,7 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
+ }
+ 
+ /** The describe hooks of a registry renderer or of a custom tool object. */
+-type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
++type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult" | "onResultAction">;
+ 
+ /** Optional kinds of the host's vocabulary the describe hooks branch on. */
+ type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json" | "shell" | "tray">>;
+@@ -473,6 +473,10 @@ export class ToolExecutionComponent extends Container {
+ 	};
+ 	// Machine paths remain verbatim; only #result.details is handed to display renderers.
+ 	#rawDetails: unknown;
++	// Keep the host action payload separate from sanitized display details.
++	#actionResult: ToolResultFrame | undefined;
++	#resultActionError: string | undefined;
++	#disposed = false;
+ 	// Edit preview state
+ 	#editMode?: EditMode;
+ 	#editDiffPreview?: PerFileDiffPreview[];
+@@ -877,6 +881,7 @@ export class ToolExecutionComponent extends Container {
+ 		this.#partialResultShapePainted = false;
+ 		this.#rawDetails = result.details;
+ 		this.#updateShellTrace(result.details);
++		this.#actionResult = result;
+ 		// Renderers receive sanitized details for display; raw paths are available
+ 		// separately for links and media through the built-in render context.
+ 		const details = sanitizeTextDeep(result.details);
+@@ -1184,6 +1189,7 @@ export class ToolExecutionComponent extends Container {
+ 		this.#stopShellReplay();
+ 		this.#shellInspector?.hide();
+ 		this.#shellInspector = undefined;
++		this.#disposed = true;
+ 		this.stopAnimation();
+ 		super.dispose();
+ 	}
+@@ -1220,6 +1226,40 @@ export class ToolExecutionComponent extends Container {
+ 		}
+ 		const expanded = rootToggleExpanded(event);
+ 		if (expanded !== undefined) this.setExpanded(expanded);
++		if (event.type !== "action" || this.#disposed || this.#isPartial || !this.#actionResult || !this.#toolCallId) {
++			return;
++		}
++		// Actions belong to the actual registered tool, never a name-keyed fallback
++		// renderer. A restored card has the same tool and persisted call inputs.
++		const tool = this.#tool as ToolDescriber | undefined;
++		if (!tool?.onResultAction) return;
++		try {
++			void Promise.resolve(
++				tool.onResultAction({
++					action: event.act,
++					toolCallId: this.#toolCallId,
++					args: this.#args,
++					result: this.#actionResult as AgentToolResult<unknown>,
++				}),
++			).catch(error => this.#showResultActionError(error));
++		} catch (error) {
++			this.#showResultActionError(error);
++		}
++	}
++
++	#showResultActionError(error: unknown): void {
++		logger.warn("Tool result action failed", { tool: this.#toolName, error: String(error) });
++		if (this.#disposed) return;
++		this.#resultActionError = sanitizeText(error instanceof Error ? error.message : String(error));
++		this.#displayInputVersion++;
++		this.#blockVersion++;
++		this.#ui.requestRender();
++	}
++
++	#resultActionErrorNode(): NativeNode | undefined {
++		return this.#resultActionError === undefined
++			? undefined
++			: text([span(`Action failed: ${this.#resultActionError}`, "error")], { role: "omp.tool.actionError" });
+ 	}
+ 
+ 	/**
+@@ -1406,6 +1446,8 @@ export class ToolExecutionComponent extends Container {
+ 		const late = this.#lateDiagnosticsParts();
+ 		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
+ 		if (late.section) body.push(late.section);
++		const actionError = this.#resultActionErrorNode();
++		if (actionError) body.push(actionError);
+ 		const inline = view.inline === true;
+ 		const hasBody = body.length > 0;
+ 		const ms = this.#elapsedMs(status);
+@@ -1429,7 +1471,9 @@ export class ToolExecutionComponent extends Container {
+ 				href: head?.href,
+ 				meta: head?.meta,
+ 				badges: badges.length > 0 ? badges : undefined,
+-				note: head?.note ?? (status === "cancelled" && !this.#isBenignSkip() ? "cancelled" : undefined),
++				note: this.#resultActionError !== undefined
++					? `Action failed: ${this.#resultActionError}`
++					: head?.note ?? (status === "cancelled" && !this.#isBenignSkip() ? "cancelled" : undefined),
+ 				exit: head?.exit ?? undefined,
+ 				status,
+ 				age: live ? ms : undefined,
+@@ -1483,6 +1527,9 @@ export class ToolExecutionComponent extends Container {
+ 				title: typeof fallbackHead === "string" ? fallbackHead : fallbackHead?.map(s => s.t).join(""),
+ 			}),
+ 		];
++		if (this.#resultActionError !== undefined) {
++			headChildren.push(text([span("Action failed", "error")], { title: this.#resultActionError }));
++		}
+ 		const started = this.#executionStartedAtNow;
+ 		if (started !== undefined) {
+ 			const ended = status === "running" ? undefined : this.#executionEndedAtNow;
+@@ -1494,6 +1541,7 @@ export class ToolExecutionComponent extends Container {
+ 			...(view.body ?? []),
+ 			...this.#nativeResultImages(view.body),
+ 			...(late.section ? [late.section] : []),
++			...(this.#resultActionError === undefined ? [] : [this.#resultActionErrorNode()!]),
+ 		];
+ 		const role = `omp.tool.${this.#toolName}`;
+ 		if (view.inline) return col(children, { role });
+diff --git a/src/tools/renderer.ts b/src/tools/renderer.ts
+index 00055981a146ce132cf8dbe3daa1fcad3e92f97f..cb57ecb0053a34a48c21fce85601d6372e20a50a 100644
+--- a/src/tools/renderer.ts
++++ b/src/tools/renderer.ts
+@@ -3,6 +3,7 @@
+  * transcript components. Built-in renderers live beside this file; the
+  * coding-agent tools implement the matching `*Details` payloads.
+  */
++import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+ import type { ShellTrace, ShellVizPresentation, TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+ import type { NativeChild } from "../native/node";
+ import type { Component } from "../tui";
+@@ -61,6 +62,14 @@ export interface ToolRenderResult<TDetails = unknown> {
+ 	isError?: boolean;
+ }
+ 
++/** A human action on a settled tool card, including replayed history. */
++export interface ToolResultActionEvent<TArgs = unknown, TDetails = unknown> {
++	action: string;
++	toolCallId: string;
++	args: TArgs;
++	result: AgentToolResult<TDetails>;
++}
++
+ /**
+  * A fence a tool call draws under its card, as assistant Markdown draws that
+  * fence. Any fence language may be named (`svg`, `mermaid`, `obj`); the
+@@ -183,6 +192,8 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
+ 		args?: TArgs,
+ 	): NativeToolView | undefined;
+ 	mergeCallAndResult?: boolean;
++	/** Host UI only: never invoked by a model tool call or for a partial result. */
++	onResultAction?(event: ToolResultActionEvent<TArgs, TDetails>): void | Promise<void>;
+ 	/**
+ 	 * The fence a call draws under its card (a `.svg` being written, as its
+ 	 * image): growing while the args stream, closed once they are final; none

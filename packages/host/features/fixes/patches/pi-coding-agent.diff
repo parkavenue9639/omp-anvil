@@ -1,0 +1,63 @@
+diff --git a/src/cli/gc-cli.ts b/src/cli/gc-cli.ts
+index e2781a19475c58dedfb1f123d16efec6e0079864..a44c0dba3233b9738f04f2debded6b28220f98d7 100644
+--- a/src/cli/gc-cli.ts
++++ b/src/cli/gc-cli.ts
+@@ -714,14 +714,14 @@ interface StaleCandidate {
+ }
+ 
+ /**
+- * Config-root stores (`reports/`, `collab/`) live beside the agent dir, not in
+- * it. The default agent dir resolves them through the dirs resolver (XDG-aware);
+- * a custom agent dir named `agent` owns its parent as config root; any other
+- * custom agent dir has no config root for gc to maintain.
++ * The current agent scope resolves reports/collab through the same effective
++ * config root as their writers (including explicit agent-dir overrides).
++ * For another explicitly targeted agent dir, keep the existing fallback:
++ * a directory named `agent` owns its parent; other names have no root stores.
+  */
+ function resolveConfigRootStores(agentDir: string): { reportsDir: string; collabDir: string } | undefined {
+ 	const configRoot = getConfigRootDir();
+-	if (normalizePathForComparison(agentDir) === normalizePathForComparison(path.join(configRoot, "agent"))) {
++	if (normalizePathForComparison(agentDir) === normalizePathForComparison(getAgentDir())) {
+ 		return { reportsDir: getReportsDir(), collabDir: path.join(configRoot, "collab") };
+ 	}
+ 	if (path.basename(agentDir) !== "agent") return undefined;
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index e4cfb6ab48a8cbbb31fc8ab11d542992ce886a8b..7bb1aec8308370e92450c87c102fbbe2cab4d90a 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -1322,6 +1322,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	#adoptedResetMarkers = new Map<string, number>();
+ 	// Extension system
+ 	#extensionRunner: ExtensionRunner | undefined = undefined;
++	#getToolContext: AgentSessionConfig["advisorGetToolContext"];
+ 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
+ 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+ 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
+@@ -2249,6 +2250,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			}
+ 		}
+ 		this.settings = config.settings;
++		this.#getToolContext = config.advisorGetToolContext;
+ 		this.#ownsCostGate = config.costGate === undefined;
+ 		this.#costGate = config.costGate ?? this.#createCostGate();
+ 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
+@@ -6089,7 +6091,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		// the wrapper still enforces the mode-accurate gate before execution.
+ 		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.settings);
+ 		const approvalArgs = computer ? { actions: computer.actions } : ctx.args;
+-		if (resolveApproval(ctx.tool, approvalArgs, "yolo", userPolicies).policy === "deny") {
++		if (
++			resolveApproval(
++				ctx.tool,
++				approvalArgs,
++				"yolo",
++				userPolicies,
++				undefined,
++				undefined,
++				this.#getToolContext?.(),
++			).policy === "deny"
++		) {
+ 			return undefined;
+ 		}
+ 		const eventArgs = computer

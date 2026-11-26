@@ -1,0 +1,883 @@
+diff --git a/dist/types/task/frontend-mcp.d.ts b/dist/types/task/frontend-mcp.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b326cab337782f1c08cf94e4446d517514632d56
+--- /dev/null
++++ b/dist/types/task/frontend-mcp.d.ts
+@@ -0,0 +1,8 @@
++import type { MCPManager, MCPManagerApi } from "../mcp/manager.js";
++export declare const FRONTEND_AGENT_NAME = "frontend-engineer";
++export declare function isFrontendMcpToolAllowed(tool: { mcpServerName?: string; mcpToolName?: string }): boolean;
++export declare function filterFrontendMcpTools<T extends { mcpServerName?: string; mcpToolName?: string }>(tools: readonly T[]): T[];
++export declare function isFrontendMcpResourceUriAllowed(uri: string): boolean;
++/** Live filtered view of existing parent connections; not an OS/network or Figma file sandbox. */
++export declare function frontendMcpManager(source: MCPManager): MCPManager;
++export declare function frontendMcpManager(source: MCPManagerApi): MCPManagerApi;
+diff --git a/dist/types/task/frontend-skills.d.ts b/dist/types/task/frontend-skills.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3e3f809d7c199a38bfbd0754de1536eb05da097
+--- /dev/null
++++ b/dist/types/task/frontend-skills.d.ts
+@@ -0,0 +1,4 @@
++import type { Skill } from "../extensibility/skills.js";
++export declare function isFrontendSkillName(name: string): boolean;
++/** Add the reserved, installation-relative skills without replacing project skills. */
++export declare function withFrontendSkills(skills: Skill[] | undefined): Skill[];
+diff --git a/dist/types/task/persisted-revive.d.ts b/dist/types/task/persisted-revive.d.ts
+index 4ad7ca767eae402fedc7770cebeffeba57dff260..344389767d9ec942df3174301f3c0c3d40d5be94 100644
+--- a/dist/types/task/persisted-revive.d.ts
++++ b/dist/types/task/persisted-revive.d.ts
+@@ -2,6 +2,7 @@ import type { ModelRegistry } from "../config/model-registry.js";
+ import type { Settings } from "../config/settings.js";
+ import type { AsyncJobManagerApi } from "../async/index.js";
+ import type { PreparedExtension } from "../extensibility/extensions/types.js";
++import type { MCPManagerApi } from "../mcp/manager.js";
+ import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle.js";
+ import { type AgentRef } from "../registry/agent-registry.js";
+ import type { AgentSession } from "../session/agent-session.js";
+@@ -23,6 +24,8 @@ export interface PersistedSubagentReviveContext {
+     authStorage: AuthStorage;
+     modelRegistry: ModelRegistry;
+     settings: Settings;
++    /** Live owner connection for frontend revival; never substitute process-global MCP. */
++    mcpManager?: MCPManagerApi;
+     /** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
+     enableLsp: boolean;
+     /**
+diff --git a/dist/types/tools/index.d.ts b/dist/types/tools/index.d.ts
+index 47bf4eee1032243730a548543608434c60497a6c..9d14bfbaa5f5452feae9ccdaf981b5372c588850 100644
+--- a/dist/types/tools/index.d.ts
++++ b/dist/types/tools/index.d.ts
+@@ -414,8 +414,8 @@ export interface ToolSession {
+     asyncJobManager?: AsyncJobManagerApi;
+     /** MCP manager visible to subagents without relying on the process-global singleton. */
+     mcpManager?: MCPManagerApi;
+-    /** This session's view of {@link mcpManager}; subagents it spawns start from it. Unset for the owner. */
+     mcpToolScope?: MCPToolScope;
++    mcpReadProfile?: "frontend";
+     /** Local protocol root to propagate to nested subagents and eval-created agents. */
+     localProtocolOptions?: LocalProtocolOptions;
+     /** Settings instance for passing to subagents */
+diff --git a/src/internal-urls/mcp-protocol.ts b/src/internal-urls/mcp-protocol.ts
+index 72fe3b8360d642d7a975104097658c01d421f84b..f7bb9703953832dba4fd8f6645584d1eeb969548 100644
+--- a/src/internal-urls/mcp-protocol.ts
++++ b/src/internal-urls/mcp-protocol.ts
+@@ -1,6 +1,7 @@
+ import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+ import { MCPManager, type MCPManagerApi } from "../mcp/manager";
+ import type { MCPResourceReadResult } from "../mcp/types";
++import { frontendMcpManager, isFrontendMcpResourceUriAllowed } from "../task/frontend-mcp";
+ import mcpDoc from "../prompts/internal-urls/mcp.md" with { type: "text" };
+ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
+ 
+@@ -226,11 +227,18 @@ export class McpProtocolHandler implements ProtocolHandler {
+ 	}
+ 
+ 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
+-		const mcpManager = await MCPManager.load();
++		const frontend = context?.session?.mcpReadProfile === "frontend";
++		if (frontend && !isFrontendMcpResourceUriAllowed(extractResourceUri(url))) {
++			throw new Error("MCP resource is not granted by the frontend-read profile");
++		}
++		const inherited = context?.session?.mcpManager;
++		const mcpManager = frontend
++			? context?.session?.enableMCP !== false && inherited ? frontendMcpManager(inherited) : undefined
++			: await MCPManager.load();
+ 		if (!mcpManager) {
+ 			throw new Error("No MCP manager available. MCP servers may not be configured.");
+ 		}
+-		const resource = await readMcpResource(mcpManager, url, { signal: context?.signal });
++		const resource = await readMcpResource(mcpManager, url, { exact: frontend, signal: context?.signal });
+ 		if (resource) return resource;
+ 		throw new McpResourceNotFoundError(
+ 			`No MCP server has resource "${extractResourceUri(url)}".\n\nAvailable resources:\n${formatAvailableResources(mcpManager)}`,
+diff --git a/src/internal-urls/skill-protocol.ts b/src/internal-urls/skill-protocol.ts
+index d81798f255bd88330b7aa9d9e47062e69d6b09e6..2bc1e95947b611b12303d62d4a1711147a5938cb 100644
+--- a/src/internal-urls/skill-protocol.ts
++++ b/src/internal-urls/skill-protocol.ts
+@@ -23,6 +23,7 @@ import {
+ 	type SkillRediscoveryHost,
+ } from "../extensibility/skills";
+ import { MCPManager, type MCPManagerApi } from "../mcp/manager";
++import { frontendMcpManager, isFrontendMcpResourceUriAllowed } from "../task/frontend-mcp";
+ import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
+ import {
+ 	buildDirectoryResource,
+@@ -316,6 +317,10 @@ export class SkillProtocolHandler implements ProtocolHandler {
+ 			target = await locateSkillTarget(url, context, false);
+ 		} catch (error) {
+ 			if (!(error instanceof UnknownSkillError)) throw error;
++			const frontend = context?.session?.mcpReadProfile === "frontend";
++			const inherited = context?.session?.mcpManager;
++			if (frontend && (!isFrontendMcpResourceUriAllowed(url.rawHref ?? url.href) ||
++				context?.session?.enableMCP === false || !inherited)) throw error;
+ 			// Loaded skills always win; otherwise serve the resource an MCP server advertises under
+ 			// exactly this URI (Figma's `skill://figma/figma-use/SKILL.md`). Templates stay behind `mcp://`.
+ 			// A deferred MCP startup that fails cannot change the diagnosis: the skill is still unknown.
+@@ -324,12 +329,14 @@ export class SkillProtocolHandler implements ProtocolHandler {
+ 			const deadline = Date.now() + UNKNOWN_SKILL_MCP_WAIT_MS;
+ 			let mcpManager: MCPManagerApi | undefined;
+ 			try {
+-				mcpManager = await withTimeout(
+-					MCPManager.load(),
+-					UNKNOWN_SKILL_MCP_WAIT_MS,
+-					"MCP startup outlasted the unknown-skill wait",
+-					context?.signal,
+-				);
++				mcpManager = frontend
++					? frontendMcpManager(inherited!)
++					: await withTimeout(
++						MCPManager.load(),
++						UNKNOWN_SKILL_MCP_WAIT_MS,
++						"MCP startup outlasted the unknown-skill wait",
++						context?.signal,
++					);
+ 			} catch (loadError) {
+ 				if (context?.signal?.aborted) throw loadError;
+ 				logger.debug("MCP startup failed while resolving an unknown skill", { url: url.href, error: loadError });
+@@ -375,7 +382,12 @@ export class SkillProtocolHandler implements ProtocolHandler {
+ 				context?.containSkillPaths === true,
+ 			);
+ 		} catch (error) {
+-			if (error instanceof UnknownSkillError && !options?.localOnly && MCPManager.available()) return null;
++			if (error instanceof UnknownSkillError && !options?.localOnly) {
++				if (context?.session?.mcpReadProfile === "frontend") {
++					if (context.session.enableMCP !== false && context.session.mcpManager &&
++						isFrontendMcpResourceUriAllowed(url.rawHref ?? url.href)) return null;
++				} else if (MCPManager.available()) return null;
++			}
+ 			throw error;
+ 		}
+ 		return options?.create || target.stats ? target.path : null;
+diff --git a/src/main.ts b/src/main.ts
+index 1ab974be282cf4156bc00e61cbde2d20c7c36af7..6475680d88458c9f62eb643e30de00eb846775da 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -2714,6 +2714,7 @@ export async function runRootCommand(
+ 					session,
+ 					authStorage,
+ 					modelRegistry,
++					mcpManager,
+ 					settings: settingsInstance,
+ 					enableLsp: sessionOptions.enableLsp ?? true,
+ 					eventBus,
+diff --git a/src/prompts/agents/frontend-engineer.md b/src/prompts/agents/frontend-engineer.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a72bba14e78a14ed9f2d96b8d984d3f0e417456a
+--- /dev/null
++++ b/src/prompts/agents/frontend-engineer.md
+@@ -0,0 +1,24 @@
++---
++name: frontend-engineer
++description: "前端工程实现预设。用于组件、状态、交互、可访问性和响应式的有界实现或修复；不绑定特定框架，也不把创意发散当作常规前端工作的必经环节。"
++model: "@frontend"
++tools: read, find, grep, glob, lsp, bash, edit, write, web_search, eval
++spawns: []
++autoloadSkills: lcp-frontend-engineering, lcp-frontend-tools
++---
++
++你负责授权范围内的前端工程实现，不接管父 agent 的整体任务，也不重新选择产品方向。
++
++工作方式：
++- 先读取任务包、相关实现和已有界面约定，沿现有组件、设计 token 和交互模式完成有界改动。普通界面工作直接实现，不先经过 creative。
++- 可以决定局部结构、状态边界和已有模式的适配；不能改变未授权的信息架构、品牌或视觉方向，也不能把单次偏差扩成重设计。
++- 已自动加载的 `lcp-frontend-engineering` 与 `lcp-frontend-tools` 对本次实现生效。项目规则、AGENTS 和项目技能仍由原生上下文提供，不在这里复制，也不为具体框架额外预载手册。
++- 创新项目、重大创新特性或明确要求差异化时，由父 agent 决定是否使用 creative；若需要改变已定方向，先返回父 agent 裁决。普通实现不制造创新需求，也不把创意发散当作前置阶段。
++- 任务包引用了 `local://` 或 `agent://` 时直接读取原文，并严格在当前分配的工作树（`cwd`）内操作：同回合批量并行 `read` 关联组件与样式（中小文件整文件读取、大文件一次读齐全部待改区间，严禁凭 `grep` 行号盲改未展示行），连续批量落地组件改动，不借相对路径越界写入其他检出目录。运行中收到主 agent 或同级 `agent://` 纠偏立即吸收。触发任务包的 `Stop-if`、基线契约矛盾、修改越出己方边界，或同一阻碍反复尝试仍无新证据时，带已有证据返回父 agent。
++- 交互、焦点、响应式或视觉是否成立，以任务约定的真实浏览器观察为准。项目级构建、测试套件和最终冒烟由父 agent 统一执行。若本次修改了代码文件且 `lsp` 可用，禁止中途逐次检查，仅在改动收尾返回前对所改文件集中执行一轮 `lsp` `diagnostics` 并修掉本次引入的诊断；该语言未配置语言服务时直接跳过。没有渲染后证据时，不能把源码修改说成界面验收通过。
++- 不嵌套派发其他 agent，也不声明独立 effort、prewalk 或 advisor。
++
++返回：
++1. 交付的界面行为与改动文件。
++2. 复用的组件、token 或模式，以及因此覆盖的状态。
++3. 实际观察到的诊断或浏览器证据、未验证项，和需要父 agent 决定的事项。
+diff --git a/src/prompts/tools/task.md b/src/prompts/tools/task.md
+index 5f9ebe44d29f3b52927a4b7adc4f0fb950b3fcd7..cf7e6222073f7786b9d97c561a13eeac4abf6770 100644
+--- a/src/prompts/tools/task.md
++++ b/src/prompts/tools/task.md
+@@ -26,6 +26,7 @@ Run one agent synchronously.
+ 
+ # Delegation
+ Delegation is optional. Read `skill://subagent-coordination` before non-trivial dispatch for inline-vs-delegate economics, specialist trade-offs, and orchestration patterns; select each item's `agent` from `# Available Agents` below by openness, internal complexity, and surface rather than defaulting heterogeneous work to `{{defaultAgent}}`.
++For scoped frontend engineering — components, UI state, interactions, accessibility, and responsive behavior — use `frontend-engineer`; a frontend file alone does not require specialist delegation.
+ Use `creative` sparingly, only for innovative projects, major innovative features, or an explicit need for differentiated exploration; routine features and ordinary plans do not need it. File count, material length, images, and keywords alone do not select a preset.
+ {{#if batchEnabled}}Put specialist `agent` selectors and per-task `cwd` inside each `tasks[]` item, NEVER at the top level.
+ {{/if}}Keep `scout` read-only (no `bash`/`eval`); mutating children own disjoint files in their assigned `cwd`. Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. Set shared interfaces in {{#if batchEnabled}}`context` (or `local://<path>`){{else}}the task{{/if}}. Children may run fast isolated file-level checks when non-conflicting; reserve workspace-wide builds, codegen, formatters, and shared test gates for parent integration.
+diff --git a/src/sdk.ts b/src/sdk.ts
+index a2d64a6ac693982bfee25e77dcceccf0e72f9e00..150c8ab692dfbc7e090fb8680b4ef522a2ecc1b1 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -185,6 +185,8 @@ import { isEvalNamespaceTool, MCPEvalNamespaceCatalog } from "./mcp/eval-namespa
+ import { mapPromptArguments } from "./mcp/prompt-args";
+ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
+ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
++import { FRONTEND_AGENT_NAME, frontendMcpManager, isFrontendMcpToolAllowed } from "./task/frontend-mcp";
++import { withFrontendSkills } from "./task/frontend-skills";
+ import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
+ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
+ import type { MnemopiSessionStateApi } from "./mnemopi/state";
+@@ -2557,6 +2559,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 	// Visuals (Mermaid, SVG figures, table charts) are drawn only in the top-level TUI transcript.
+ 	const tuiTranscript = options.tuiTranscript === true && !isSubagentSession;
+ 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
++	const frontendSession = resolvedAgentName === FRONTEND_AGENT_NAME;
++	if (frontendSession) skills = withFrontendSkills(skills);
+ 
+ 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
+ 	const discovered = await logger.time("discoverTtsrRules", async () => {
+@@ -2751,6 +2755,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			advertiseHeadlessAsk: options.advertiseHeadlessAsk,
+ 			settingsApproval: options.settingsApproval === true && !isSubagentSession,
+ 			tuiTranscript,
++			mcpReadProfile: frontendSession ? "frontend" : undefined,
+ 			// Explicit resolvers retain their existing pass-through contract. Ordinary
+ 			// sessions inherit stored affinity into the child's own provider session.
+ 			getApiKey: options.getApiKey,
+@@ -3040,11 +3045,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		});
+ 
+ 		// Restricted sessions cannot inherit or discover MCP capabilities.
+-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
++		// Frontend tasks reuse an admitted parent connection, never discover extra servers.
++		const enableMCP = !restrictToolNames && (options.enableMCP ?? true) && (!frontendSession || options.mcpManager !== undefined);
+ 		let mcpManager: MCPManagerApi | undefined = enableMCP ? options.mcpManager : undefined;
+-		// A subagent worker thread never connects MCP servers itself: it reuses the main thread's manager.
+ 		if (enableMCP && !mcpManager && !isMainThread()) mcpManager = MCPManager.instance();
+-		/** Manager this session created by running discovery (it owns its callbacks); unset when reused. */
++		if (frontendSession && mcpManager) mcpManager = frontendMcpManager(mcpManager);
+ 		let ownedMcpManager: MCPManager | undefined;
+ 		toolSession.mcpManager = mcpManager;
+ 		toolSession.mcpToolScope = options.mcpToolScope;
+@@ -3164,7 +3169,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		// receive the parent's manager via `options.mcpManager`, and reassigning
+ 		// the singleton to the same value is a no-op — keep the gate explicit
+ 		// to mirror the AsyncJobManager ownership rule.
+-		if (mcpManager instanceof MCPManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
++		if (mcpManager instanceof MCPManager && !options.parentTaskPrefix && !frontendSession) MCPManager.setInstance(mcpManager);
+ 
+ 		const builtInToolNames = [...toolRegistry.keys()];
+ 		let customToolPaths: ToolPathWithSource[] = [];
+@@ -4126,11 +4131,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		const explicitCustomTools =
+ 			restrictToolNames && options.allowRestrictedCustomTools !== true
+ 				? []
+-				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
++				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool) &&
++					(!frontendSession || (!tool.mcpServerName && !tool.mcpToolName) || (enableMCP && isFrontendMcpToolAllowed(tool)))) ?? []);
+ 		const explicitCustomToolNames = new Set(explicitCustomTools.map(tool => tool.name));
+-		const sdkMcpTools = restrictToolNames
++		const sdkMcpTools = restrictToolNames || (frontendSession && !enableMCP)
+ 			? []
+-			: (options.mcpTools ?? []).filter(tool => !explicitCustomToolNames.has(tool.name));
++			: (options.mcpTools ?? []).filter(tool => !explicitCustomToolNames.has(tool.name) && (!frontendSession || isFrontendMcpToolAllowed(tool)));
+ 		initialMcpManagerTools.push(...sdkMcpTools);
+ 		const sdkCustomTools = [...sdkMcpTools, ...explicitCustomTools];
+ 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
+@@ -5662,14 +5668,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			skillDescriptions,
+ 			mcpNamespaces,
+ 			skillWarnings,
+-			skillsReloadable: options.skills === undefined,
++			skillsReloadable: options.skills === undefined && !frontendSession,
+ 			skillsSettings: cfgSkills.get(settings),
+ 			modelRegistry,
+ 			allowSessionModelFallback: options.hasUI === true && options.allowSessionModelFallback !== false,
+ 			interactivePrompts: options.interactivePrompts,
+ 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
+ 			toolRegistry,
+-			reconcileBrowserMcpFilter: mcpManager
++			reconcileBrowserMcpFilter: mcpManager && !frontendSession
+ 				? async enabled => {
+ 						await mcpManager.reconcileBrowserFilter(enabled);
+ 						return mcpManager.getTools();
+diff --git a/src/skills/lcp-frontend-engineering/SKILL.md b/src/skills/lcp-frontend-engineering/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d04273cbca78ed57931caf1d4ace542a12b5f3a
+--- /dev/null
++++ b/src/skills/lcp-frontend-engineering/SKILL.md
+@@ -0,0 +1,43 @@
++---
++name: lcp-frontend-engineering
++description: "框架中立的前端工程实现约定。在实现或修复界面时复用既有组件与设计 token，补全真实会到达的状态，并处理语义、可访问性、响应式、加载与性能，以及确定性状态、生命周期和清理。不替代项目规则，也不绑定具体框架。"
++---
++
++# 前端工程实现
++
++按任务包和当前仓库已经存在的实现工作。项目规则、AGENTS 和项目技能仍然生效；本技能不复制它们，也不为每个框架预载一份手册。
++
++## 复用
++
++- 先找已有组件、布局、token、间距、颜色、字体和交互约定，再决定是否新增。
++- 不为一次偏差另起一套平行样式或组件。偶然数值不能代替结构修正。
++- 未授权的信息架构、品牌和视觉方向保持不变。
++
++## 完整状态
++
++覆盖该界面真实会到达的状态，而不是只做成功路径。常见包括默认、悬停、焦点、按下、禁用、空、加载、错误、部分成功、校验失败，以及内容变长、变空或换行。任务涉及的视口都要能完成关键操作。不要为了清单补造这个界面不存在的状态。
++
++## 语义、可访问性与响应式
++
++- 元素和可访问名称要表达含义。图标按钮、表单控件和状态变化必须能被识别，不靠颜色单独传达状态。
++- 键盘路径、焦点顺序和可见焦点与指针路径一致。禁用和加载中的控件不能留下无法退出的焦点。
++- 不把一种屏幕宽度上的补丁写成全局规则，也不让关键操作被遮挡或截断。
++
++## 加载与性能
++
++- 加载、提交和刷新要有可辨别的进行中状态，结束后回到确定结果。
++- 不在交互路径上做无界重复渲染，也不把仓库已经采用的分页或虚拟化换成一次性物化。
++- 图片、字体和动画沿用已有尺寸、格式和加载约定。不引入未授权的资源管线。
++
++## 状态、生命周期与清理
++
++- 用户输入、远端数据和派生显示要有可解释的来源，不能互相覆盖。
++- 定时器、订阅、请求、监听器和浏览器资源在离开、取消或替换时清理。
++- 异步结果返回时核对仍是当前请求。过期响应不能改写新状态。
++- 相同输入和相同外部结果应得到相同界面结果。不把随机、当前时间或未声明的全局可变状态写进渲染结果。
++
++## 证据
++
++源码修改不是界面验收。交互、焦点、响应式或视觉结论需要任务约定的真实浏览器观察；采集边界见 `lcp-frontend-tools`。没有观察时写明未验证项，不把估计说成测量。
++
++常规组件、状态和可访问性工作直接实现。`creative` 只用于创新项目、重大创新特性或明确的差异化探索，不是前端工程的必经环节。
+diff --git a/src/skills/lcp-frontend-tools/SKILL.md b/src/skills/lcp-frontend-tools/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca9f9026db566f95ba858e1eb534c819ce97aa7c
+--- /dev/null
++++ b/src/skills/lcp-frontend-tools/SKILL.md
+@@ -0,0 +1,38 @@
++---
++name: lcp-frontend-tools
++description: "前端工程的原生工具边界。说明 LSP、Eval 及其 browser 前导、已授权的 MCP 与设计稿读取、资产权利，以及工具 schema 和真实授权的区别。在需要诊断、浏览器证据或外部设计读取时使用；不关闭默认 MCP，也不授予凭证或未授权登录态。"
++---
++
++# 前端工具边界
++
++只使用本回合实际授予的工具和资源。schema、描述、示例或未出现在会话里的服务器名都不构成授权。工具列表也不是隔离边界。
++
++## LSP 与 Eval
++
++- 改了代码后，若 `lsp` 可用，对所改文件执行 `diagnostics`，并修掉本次引入的诊断。该语言没有语言服务时跳过，不改跑项目级构建或测试套件代替。
++- `eval` 是进程内代码核，可用于核对和浏览器证据。它能访问文件系统和进程，仍受审批约束。
++- 浏览器不是单独列出的预设工具。需要真实页面时，在 Eval 里使用原生 `browser`。静态内容用 `read`。
++
++## 浏览器归属
++
++- 优先使用本任务独占的托管或隔离页面，不默认借用已有用户页面。核对 `browser.open` 返回的实际浏览器类型与标签归属；Tern/WKWebView 不等于 Chromium，验证能力也不完全相同。
++- relay 的 `app.target`、Tern 里已经打开的页面，以及 CDP 附着的用户页面，都是对方的真实登录态。未经授权不导航、不操作、不读取其存储，也不关闭。
++- 未授权时不要把真实 cookie、存储或登录态复制进托管浏览器。
++- 关闭只释放本次打开的托管标签。不关闭借用的用户标签，也不终止不是本进程启动的浏览器进程。
++
++## MCP 与设计稿
++
++- 默认 MCP 读能力可用，但只使用实际授予的前端读 profile 和连接。本预设不配置账号、不把 MCP 整类禁用，也不把服务器名或工具 schema 当作新的授权。
++- 只使用本回合实际授予的 MCP 工具和资源。没有授予的服务器、工具或资源就当作不存在。
++- 设计稿读取，包括已授权的 Figma 只读工具或资源，只读取节点、样式、变量和导出所需的事实。schema 里出现写入、发布或评论，不等于可以执行。
++- 不把设计文件、私有代码或凭证上传到外部服务。不把工具返回的密钥、cookie 或账号标识写入仓库、日志或回复。
++- 有明确的 Figma 目标时，先加载当前项目适用且实际可用的设计实现技能，并核对真实工具 schema。读取目标节点的 design context 与 screenshot；范围过大时先用 metadata 拆分，不导出整个无关设计文件。
++- 按需读取变量与组件映射，复用项目 token、组件和资产。Figma 返回的 React/Tailwind 或绝对定位原型不是框架选择或最终工程代码，截图也不是交互契约。
++- 前端读 profile 不提供画布写入、发布、上传、账号信息或任意服务器资源。缺少获准工具时报告限制，不借别的服务器、全局资源路径或真实登录页绕过。
++- 查框架文档时只传公开库名、版本与问题，不上传私有源码。工具失败、认证问题或 schema 不兼容时保留可核对的错误类别，不擅自安装服务、改账号或扩大访问。
++
++## 资产权利
++
++- 只使用任务和仓库已经拥有权利的字体、图标、图片和设计导出。
++- 不从外部页面或设计工具复制权利不清的素材，也不执行下载来的脚本。
++- 导出资产沿用仓库已有的目录和引用方式。权利不清时停下来说明，不先放进产品。
+diff --git a/src/task/agents.ts b/src/task/agents.ts
+index 0ef2a1e733cca58a43fa2bdbdc3ead4574f06f90..4ab48ee86a10c2830ada09237cec73876378cffd 100644
+--- a/src/task/agents.ts
++++ b/src/task/agents.ts
+@@ -12,6 +12,7 @@ import creativeMd from "../prompts/agents/creative.md" with { type: "text" };
+ import deepMd from "../prompts/agents/deep.md" with { type: "text" };
+ import engineerMd from "../prompts/agents/engineer.md" with { type: "text" };
+ import fastMd from "../prompts/agents/fast.md" with { type: "text" };
++import frontendEngineerMd from "../prompts/agents/frontend-engineer.md" with { type: "text" };
+ import legacySonicMd from "../prompts/agents/legacy-sonic.md" with { type: "text" };
+ import reviewMd from "../prompts/agents/review.md" with { type: "text" };
+ import routineMd from "../prompts/agents/routine.md" with { type: "text" };
+@@ -58,6 +59,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
+ 	{ fileName: "routine.md", template: routineMd },
+ 	{ fileName: "task.md", template: taskMd },
+ 	{ fileName: "engineer.md", template: engineerMd },
++	{ fileName: "frontend-engineer.md", template: frontendEngineerMd },
+ 	{ fileName: "deep.md", template: deepMd },
+ 	{ fileName: "creative.md", template: creativeMd },
+ 	{ fileName: "review.md", template: reviewMd },
+@@ -90,6 +92,7 @@ const MANAGED_PRESET_NAMES: Record<string, true> = {
+ 	visual: true,
+ 	"visual-edit": true,
+ 	creative: true,
++	"frontend-engineer": true,
+ };
+ 
+ export function isManagedPresetName(name: string): boolean {
+diff --git a/src/task/executor.ts b/src/task/executor.ts
+index a6e2aacba248287cffe46bce5c5a3d8ec7cff06b..c499144d4382d2a71076340e48327cf3b82cb3a2 100644
+--- a/src/task/executor.ts
++++ b/src/task/executor.ts
+@@ -71,6 +71,8 @@ import type { LocalProtocolOptions } from "../internal-urls";
+ import { IrcBus } from "../irc/bus";
+ import type { MCPManagerApi, MCPToolScope } from "../mcp/manager";
+ import type { MnemopiSessionStateApi } from "../mnemopi/state";
++import { FRONTEND_AGENT_NAME, frontendMcpManager } from "./frontend-mcp";
++import { withFrontendSkills } from "./frontend-skills";
+ import { initializeExtensions } from "../modes/runtime-init";
+ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
+ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
+@@ -4706,6 +4708,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
+ 	const parentDepth = options.taskDepth ?? 0;
+ 	const childDepth = parentDepth + 1;
++	const autoloadSkills = agent.name === FRONTEND_AGENT_NAME
++		? withFrontendSkills(options.autoloadSkills)
++		: options.autoloadSkills;
+ 	// Creative is analysis-only: do not auto-grant memory writes, MCP or extension tools.
+ 	const restrictToolNames = options.restrictToolNames === true || agent.name === "creative";
+ 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
+@@ -5169,7 +5174,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 			}
+ 
+ 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+-			const mcpManager = enableMCP ? options.mcpManager : undefined;
++			const inheritedMcpManager = enableMCP ? options.mcpManager : undefined;
++			const mcpManager = inheritedMcpManager && agent.name === FRONTEND_AGENT_NAME
++				? frontendMcpManager(inheritedMcpManager)
++				: inheritedMcpManager;
+ 
+ 			if (options.parentTelemetry && subagentAgentIdentity) {
+ 				const parentTelemetryHandle = resolveTelemetry(
+@@ -5520,8 +5528,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 
+ 			checkAbort();
+ 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
+-			if (options.autoloadSkills?.length) {
+-				for (const skill of options.autoloadSkills) {
++			if (autoloadSkills?.length) {
++				for (const skill of autoloadSkills) {
+ 					const { message, details } = await buildSkillPromptMessage(skill, { args: "" }, "autoload", session);
+ 					await session.sendCustomMessage(
+ 						{
+diff --git a/src/task/frontend-mcp.ts b/src/task/frontend-mcp.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b2c54113d28423cb520a92abbdf760d9b0fa438
+--- /dev/null
++++ b/src/task/frontend-mcp.ts
+@@ -0,0 +1,145 @@
++import type { TSchema } from "@oh-my-pi/pi-ai";
++import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
++import type { CustomTool } from "../extensibility/custom-tools/types";
++import type { MCPManager, MCPManagerApi, MCPToolScope } from "../mcp/manager";
++
++export const FRONTEND_AGENT_NAME = "frontend-engineer";
++const FIGMA_TOOLS: Readonly<Record<string, true>> = {
++	get_design_context: true, get_metadata: true, get_screenshot: true,
++	get_variable_defs: true, get_code_connect_map: true,
++};
++const CONTEXT7_TOOLS: Readonly<Record<string, true>> = {
++	"resolve-library-id": true, "get-library-docs": true, "query-docs": true,
++};
++const SERVER_TOOLS: Readonly<Record<string, Readonly<Record<string, true>>>> = {
++	figma: FIGMA_TOOLS, "figma-cloud": FIGMA_TOOLS, "figma-desktop": FIGMA_TOOLS,
++	"figma-remote": FIGMA_TOOLS, context7: CONTEXT7_TOOLS,
++};
++const RESOURCE_URIS: Readonly<Record<string, true>> = {
++	"skill://figma/figma-design-to-code/SKILL.md": true,
++	"skill://figma/figma-use/SKILL.md": true,
++};
++function isServerAllowed(name: string): boolean { return Object.hasOwn(SERVER_TOOLS, name); }
++function isResourceServerAllowed(name: string): boolean {
++	return isServerAllowed(name) && SERVER_TOOLS[name] === FIGMA_TOOLS;
++}
++export function isFrontendMcpToolAllowed(tool: { mcpServerName?: string; mcpToolName?: string }): boolean {
++	const { mcpServerName: server, mcpToolName: method } = tool;
++	return server !== undefined && method !== undefined && isServerAllowed(server) && Object.hasOwn(SERVER_TOOLS[server], method);
++}
++export function filterFrontendMcpTools<T extends { mcpServerName?: string; mcpToolName?: string }>(tools: readonly T[]): T[] {
++	return tools.filter(isFrontendMcpToolAllowed);
++}
++export function isFrontendMcpResourceUriAllowed(uri: string): boolean { return Object.hasOwn(RESOURCE_URIS, uri); }
++
++type McpTool = CustomTool<TSchema, MCPToolDetails>;
++const managerViews = new WeakMap<MCPManagerApi, MCPManagerApi>();
++
++/** A filtered live view; connections, configuration and callbacks remain owner-bound. */
++
++type McpOwnerObservers = Pick<MCPManager, "getAllServerNames" | "getConnectionStatus" | "waitForStartup" |
++	"getNotificationState" | "addConnectionStatusListener" | "addCatalogChangeListener">;
++function hasOwnerObservers(source: MCPManagerApi): source is MCPManagerApi & McpOwnerObservers {
++	return ["getAllServerNames", "getConnectionStatus", "waitForStartup", "getNotificationState",
++		"addConnectionStatusListener", "addCatalogChangeListener"].every(key => typeof Reflect.get(source, key) === "function");
++}
++export function frontendMcpManager(source: MCPManager): MCPManager;
++export function frontendMcpManager(source: MCPManagerApi): MCPManagerApi;
++export function frontendMcpManager(source: MCPManagerApi): MCPManagerApi {
++	const existing = managerViews.get(source);
++	if (existing) return existing;
++	const toolViews = new WeakMap<McpTool, Map<MCPToolScope | undefined, { server: string; method: string; view: McpTool }>>();
++	const getTools: MCPManagerApi["getTools"] = scope => source.getTools(scope).filter(isFrontendMcpToolAllowed).map(tool => {
++		const server = tool.mcpServerName!, method = tool.mcpToolName!;
++		let scopedViews = toolViews.get(tool);
++		if (!scopedViews) { scopedViews = new Map(); toolViews.set(tool, scopedViews); }
++		const cached = scopedViews.get(scope);
++		if (cached?.server === server && cached.method === method) return cached.view;
++		const execute: McpTool["execute"] = async (...args) => {
++			const current = source.getTools(scope).find(candidate => candidate.mcpServerName === server &&
++				candidate.mcpToolName === method && isFrontendMcpToolAllowed(candidate));
++			if (!current) throw new Error(`Frontend MCP tool unavailable: ${server}/${method}`);
++			return current.execute(...args);
++		};
++		const bound = new Map<PropertyKey, unknown>();
++		const view = new Proxy(tool, {
++			get(target, key) {
++				if (key === "execute") return execute;
++				const value = Reflect.get(target, key, target);
++				if (typeof value !== "function") return value;
++				if (!bound.has(key)) bound.set(key, value.bind(target));
++				return bound.get(key);
++			},
++			set() { throw new Error("Frontend MCP tool views are read-only"); },
++		});
++		scopedViews.set(scope, { server, method, view });
++		return view;
++	});
++	const getServerResources: MCPManagerApi["getServerResources"] = name => {
++		if (!isResourceServerAllowed(name)) return undefined;
++		const catalog = source.getServerResources(name);
++		return catalog && { resources: catalog.resources.filter(resource => isFrontendMcpResourceUriAllowed(resource.uri)), templates: [] };
++	};
++	const readServerResource: MCPManagerApi["readServerResource"] = async (name, uri, options) => {
++		if (!isResourceServerAllowed(name) || !isFrontendMcpResourceUriAllowed(uri)) throw new Error(`Frontend MCP resource denied: ${name}/${uri}`);
++		if (!getServerResources(name)?.resources.some(resource => resource.uri === uri)) throw new Error(`Frontend MCP resource unavailable: ${name}/${uri}`);
++		const result = await source.readServerResource(name, uri, options);
++		if (result?.contents.some(content => content.uri !== uri)) throw new Error(`Frontend MCP resource returned an unrelated URI: ${name}/${uri}`);
++		return result;
++	};
++	const deny = (): never => { throw new Error("Frontend MCP view does not own connections, configuration, or prompts"); };
++	const methods: MCPManagerApi & Partial<MCPManager> = {
++		getTools, getServerResources, readServerResource,
++		openToolScope: (scope, seed) => source.openToolScope?.(scope, seed),
++		trackToolCall: (scope, id) => (source.trackToolCall ? source.trackToolCall(scope, id) : () => {}),
++		addToolsChangedListener: listener => source.addToolsChangedListener(listener),
++		waitForPendingConnections: () => source.waitForPendingConnections(),
++		getConnectedServers: () => source.getConnectedServers().filter(isServerAllowed),
++		ensureServerResources: async name => { if (isResourceServerAllowed(name)) await source.ensureServerResources(name); },
++		getServerInstructions: () => new Map([...source.getServerInstructions()].filter(([name]) => isServerAllowed(name))),
++		reconcileBrowserFilter: async () => deny(),
++		addNotificationListener: listener => source.addNotificationListener((server, method, params) => {
++			if (!isServerAllowed(server)) return;
++			if (method === "notifications/tools/list_changed") listener(server, method, undefined);
++			else if (isResourceServerAllowed(server)) {
++				if (method === "notifications/resources/list_changed") listener(server, method, undefined);
++				else if (method === "notifications/resources/updated" && params && typeof params === "object" &&
++					"uri" in params && typeof params.uri === "string" && isFrontendMcpResourceUriAllowed(params.uri)) listener(server, method, { uri: params.uri });
++			}
++		}),
++	};
++	// Owner-only observers do not exist on a remote manager. Preserve them only
++	// when the source actually supplies the concrete owner surface.
++	if (hasOwnerObservers(source)) {
++		const owner = source;
++		Object.assign(methods, {
++			getAllServerNames: () => owner.getAllServerNames().filter(isServerAllowed),
++			getConnectionStatus: (name: string) => isServerAllowed(name) ? owner.getConnectionStatus(name) : "disconnected",
++			getServerPrompts: () => [],
++			executePrompt: async () => deny(),
++			waitForStartup: async (timeoutMs: number) => {
++				const status = await owner.waitForStartup(timeoutMs);
++				return { connected: status.connected.filter(isServerAllowed), pending: status.pending.filter(isServerAllowed), failed: status.failed.filter(server => isServerAllowed(server.name)) };
++			},
++			getNotificationState: () => {
++				const state = owner.getNotificationState();
++				const subscriptions = new Map<string, ReadonlySet<string>>();
++				for (const [name, uris] of state.subscriptions) if (isResourceServerAllowed(name)) subscriptions.set(name, new Set([...uris].filter(isFrontendMcpResourceUriAllowed)));
++				return { enabled: state.enabled, subscriptions };
++			},
++			addConnectionStatusListener: (listener: Parameters<MCPManager["addConnectionStatusListener"]>[0]) => owner.addConnectionStatusListener(event => {
++				if (event.type === "connecting") { const serverNames = event.serverNames.filter(isServerAllowed); if (serverNames.length) listener({ ...event, serverNames }); }
++				else if (isServerAllowed(event.serverName)) listener(event);
++			}),
++			addCatalogChangeListener: (listener: Parameters<MCPManager["addCatalogChangeListener"]>[0]) => owner.addCatalogChangeListener(event => {
++				if (event.kind === "resources" && isResourceServerAllowed(event.serverName)) listener(event);
++			}),
++		} satisfies Partial<MCPManager>);
++	}
++	const view = new Proxy(source, {
++		get(_target, key) { if (key === "then") return undefined; return Object.hasOwn(methods, key) ? Reflect.get(methods, key) : deny; },
++		set: deny, defineProperty: deny, deleteProperty: deny,
++	});
++	managerViews.set(source, view); managerViews.set(view, view);
++	return view;
++}
+diff --git a/src/task/frontend-skills.ts b/src/task/frontend-skills.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4dde374c59c3f76e64250f626442df9e655d27a0
+--- /dev/null
++++ b/src/task/frontend-skills.ts
+@@ -0,0 +1,54 @@
++import { dirname } from "node:path";
++import { fileURLToPath } from "node:url";
++import { parseFrontmatter } from "@oh-my-pi/pi-utils";
++import type { Skill } from "../extensibility/skills";
++import engineeringText from "../skills/lcp-frontend-engineering/SKILL.md" with { type: "text" };
++import toolsText from "../skills/lcp-frontend-tools/SKILL.md" with { type: "text" };
++
++const FRONTEND_SKILL_NAMES: Record<string, true> = {
++	"lcp-frontend-engineering": true,
++	"lcp-frontend-tools": true,
++};
++
++let bundledSkills: readonly Skill[] | undefined;
++
++function frontendSkills(): readonly Skill[] {
++	if (bundledSkills) return bundledSkills;
++	bundledSkills = [
++		{ name: "lcp-frontend-engineering", content: engineeringText },
++		{ name: "lcp-frontend-tools", content: toolsText },
++	].map(({ name, content }) => {
++		const filePath = fileURLToPath(new URL(`../skills/${name}/SKILL.md`, import.meta.url));
++		const { frontmatter } = parseFrontmatter(content, { source: filePath, level: "off" });
++		if (frontmatter.name !== name || typeof frontmatter.description !== "string" || !frontmatter.description.trim()) {
++			throw new Error(`Invalid bundled frontend skill: ${name}`);
++		}
++		const baseDir = dirname(filePath);
++		return { name, description: frontmatter.description, filePath, baseDir, containRoot: baseDir, source: "lcp:bundled" };
++	});
++	return bundledSkills;
++}
++
++export function isFrontendSkillName(name: string): boolean {
++	return Object.hasOwn(FRONTEND_SKILL_NAMES, name);
++}
++
++/** Keep project skills intact while adding the two reserved, installation-relative frontend skills once. */
++export function withFrontendSkills(skills: Skill[] | undefined): Skill[] {
++	let merged: Skill[] | undefined;
++	for (const bundled of frontendSkills()) {
++		let existing: Skill | undefined;
++		if (skills) for (const skill of skills) {
++			if (skill.name !== bundled.name) continue;
++			if (existing) throw new Error(`Duplicate reserved frontend skill: ${bundled.name}`);
++			existing = skill;
++		}
++		if (existing) {
++			if (existing.filePath !== bundled.filePath) throw new Error(`Reserved frontend skill cannot be shadowed: ${bundled.name}`);
++			continue;
++		}
++		merged ??= skills ? [...skills] : [];
++		merged.push(bundled);
++	}
++	return merged ?? skills ?? [];
++}
+diff --git a/src/task/persisted-revive.ts b/src/task/persisted-revive.ts
+index 9c4c16c0f3a6cdf06c03164ff0e834e126f3ba59..2a7f2dfc0fb33a1d855825f5eca1cd302c08e691 100644
+--- a/src/task/persisted-revive.ts
++++ b/src/task/persisted-revive.ts
+@@ -1,5 +1,7 @@
++import { realpathSync } from "node:fs";
+ import * as fs from "node:fs/promises";
+ import * as path from "node:path";
++import * as vcs from "@oh-my-pi/pi-natives/vcs";
+ import { logger } from "@oh-my-pi/pi-utils";
+ import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
+ import { validateAgentAccountPools } from "../config/account-pools";
+@@ -14,7 +16,8 @@ import {
+ } from "../config/model-resolver";
+ import { formatModelRoleAlias } from "../config/model-roles";
+ import type { Settings } from "../config/settings";
+-import { MCPManager } from "../mcp/manager";
++import { MCPManager, type MCPManagerApi } from "../mcp/manager";
++import { FRONTEND_AGENT_NAME, frontendMcpManager } from "./frontend-mcp";
+ import { initializeExtensions } from "../modes/runtime-init";
+ import type { AsyncJobManagerApi } from "../async";
+ import type { PreparedExtension } from "../extensibility/extensions/types";
+@@ -70,6 +73,8 @@ export interface PersistedSubagentReviveContext {
+ 	authStorage: AuthStorage;
+ 	modelRegistry: ModelRegistry;
+ 	settings: Settings;
++	/** Live owner connection for frontend revival; never replace it with a process-global manager. */
++	mcpManager?: MCPManagerApi;
+ 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
+ 	enableLsp: boolean;
+ 	/**
+@@ -106,6 +111,7 @@ export interface PersistedReviveSpec {
+ 	readonly authStorage: AuthStorage;
+ 	readonly modelRegistry: ModelRegistry;
+ 	readonly settings: Settings;
++	readonly mcpManager: MCPManagerApi | undefined;
+ 	readonly enableLsp: boolean;
+ 	readonly eventBus: EventBus | undefined;
+ 	readonly subagentEventBus: EventBus | undefined;
+@@ -159,6 +165,51 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
+  * executor's subagent wiring (MCP proxy tools, depth-derived gating,
+  * yield-required, active-tool clamp, registry status sync).
+  */
++async function isCompatibleFrontendReviveCwd(peekCwd: string, ownerCwd: string): Promise<boolean> {
++	if (path.resolve(peekCwd) === path.resolve(ownerCwd)) return true;
++	let canonicalPeek: string;
++	let canonicalOwner: string;
++	try {
++		canonicalPeek = realpathSync.native(peekCwd);
++		canonicalOwner = realpathSync.native(ownerCwd);
++	} catch {
++		return false;
++	}
++	if (canonicalPeek === canonicalOwner) return true;
++	const ownerRepo = vcs.git(canonicalOwner);
++	const ownerInfo = ownerRepo?.info();
++	const peekInfo = vcs.gitInfo(canonicalPeek);
++	if (!ownerRepo || !ownerInfo || !peekInfo) return false;
++	const ownerCommonDir = realpathSync.native(ownerInfo.commonDir);
++	const peekCommonDir = realpathSync.native(peekInfo.commonDir);
++	if (ownerCommonDir !== peekCommonDir) return false;
++	const peekGitDir = realpathSync.native(peekInfo.gitDir);
++	const peekGitEntry = realpathSync.native(peekInfo.gitEntryPath);
++	const isWithin = (parentDir: string, childPath: string): boolean => {
++		const rel = path.relative(parentDir, childPath);
++		return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
++	};
++	if (isWithin(peekCommonDir, canonicalPeek) || isWithin(peekGitDir, canonicalPeek) || canonicalPeek === peekGitEntry) {
++		return false;
++	}
++	const peekRepoRoot = realpathSync.native(peekInfo.repoRoot);
++	if (!isWithin(peekRepoRoot, canonicalPeek)) return false;
++	for (const entry of await ownerRepo.worktrees()) {
++		let wtRoot: string;
++		try {
++			wtRoot = realpathSync.native(entry.path);
++		} catch {
++			continue;
++		}
++		if (wtRoot !== peekRepoRoot) continue;
++		const fresh = vcs.gitInfo(wtRoot);
++		if (fresh && realpathSync.native(fresh.repoRoot) === wtRoot && realpathSync.native(fresh.commonDir) === ownerCommonDir) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ export function createPersistedSubagentReviverFactory(
+ 	ctx: PersistedSubagentReviveContext,
+ ): PersistedSubagentReviverFactory {
+@@ -178,6 +229,10 @@ export function createPersistedSubagentReviverFactory(
+ 		// restart + peer message revives the agent outside isolation, in the
+ 		// parent cwd, contradicting the delivery notice.
+ 		if (peek.init.isolated) return undefined;
++		const frontendContract = peek.init.agent?.trim().toLowerCase() === FRONTEND_AGENT_NAME;
++		if (frontendContract && !(await isCompatibleFrontendReviveCwd(peek.cwd, ctx.session.sessionManager.getCwd()))) {
++			return undefined;
++		}
+ 		try {
+ 			await fs.stat(peek.cwd);
+ 		} catch {
+@@ -211,6 +266,7 @@ export function createPersistedSubagentReviverFactory(
+ 				authStorage: ctx.authStorage,
+ 				modelRegistry: ctx.modelRegistry,
+ 				settings: ctx.settings,
++				mcpManager: ctx.mcpManager,
+ 				enableLsp: ctx.enableLsp,
+ 				eventBus: ctx.eventBus,
+ 				subagentEventBus: ctx.subagentEventBus,
+@@ -252,6 +308,11 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 			`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
+ 		);
+ 	}
++	const frontendRevival = init.agent?.trim().toLowerCase() === FRONTEND_AGENT_NAME;
++	if (frontendRevival && !(await isCompatibleFrontendReviveCwd(reopened.getCwd(), spec.root.sessionManager.getCwd()))) {
++		await reopened.close();
++		throw new Error("Cannot revive frontend agent after its owner changes workspace. Start a new frontend task.");
++	}
+ 	const resolveParentSession = () =>
+ 		ref.parentId === spec.rootAgentId ? spec.root : registry.get(ref.parentId ?? "")?.session;
+ 	const parentSession = resolveParentSession();
+@@ -412,7 +473,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 	// A restricted persisted contract must not consult process-global MCP
+ 	// state: same-name MCP tools are untrusted capability sources.
+ 	const restrictToolNames = init.restrictToolNames === true;
+-	const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
++	const inheritedMcpManager = restrictToolNames ? undefined : frontendRevival ? spec.mcpManager : MCPManager.instance();
++	const mcpManager = inheritedMcpManager && frontendRevival ? frontendMcpManager(inheritedMcpManager) : inheritedMcpManager;
+ 	// Subscribe before minting proxies so a manager change during startup is replayed on bind.
+ 	// The revived session reopens its own view, keeping the tools its earlier requests rendered.
+ 	const mcpFollower = mcpManager ? followMCPTools(mcpManager, { scope: reopened.getSessionId() }) : undefined;
+@@ -482,7 +544,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 						preloadedCustomToolPaths: [],
+ 					}
+ 				: {
+-						enableMCP: !mcpManager,
++						enableMCP: frontendRevival ? mcpManager !== undefined : !mcpManager,
+ 						mcpManager,
+ 						mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+ 						mcpToolScope: mcpFollower?.scope,
+@@ -514,7 +576,12 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 	// Clamp the active set to the persisted list: createAgentSession's
+ 	// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
+ 	// the original run didn't carry. Unknown/missing names are ignored.
+-	await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
++	const currentFrontendMcpNames = frontendRevival ? mcpProxyTools.map(tool => tool.name) : [];
++	await session.setActiveToolsByName([
++		...revivedToolNames,
++		...currentFrontendMcpNames,
++		...session.getMountedXdevToolNames(),
++	]);
+ 	// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
+ 	if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
+ 	// Wire the extension runtime exactly as the live executor does. Without
+diff --git a/src/task/structured-subagent.ts b/src/task/structured-subagent.ts
+index 8e64d18cea9e963c4bbb0623c506fe27a8d216ac..5560a0cd50b3c758dcbc234572502276d2955b7d 100644
+--- a/src/task/structured-subagent.ts
++++ b/src/task/structured-subagent.ts
+@@ -37,6 +37,8 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
+ import { sessionLocalProtocolOptions } from "../internal-urls/context";
+ import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+ import { MCPManager } from "../mcp/manager";
++import { FRONTEND_AGENT_NAME } from "./frontend-mcp";
++import { isFrontendSkillName, withFrontendSkills } from "./frontend-skills";
+ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
+ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
+ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
+@@ -769,7 +771,7 @@ async function refreshSkillsForAutoload(session: ToolSession, agent: AgentDefini
+ 	const names = agent.autoloadSkills;
+ 	if (!names?.length || !session.refreshSkills) return;
+ 	const known = new Set((session.skills ?? []).map(skill => skill.name));
+-	if (names.every(name => known.has(name))) return;
++	if (names.every(name => known.has(name) || (agent.name === FRONTEND_AGENT_NAME && isFrontendSkillName(name)))) return;
+ 	await session.refreshSkills();
+ }
+ 
+@@ -1122,7 +1124,8 @@ async function augmentSubagentRepoContext(
+ }
+ 
+ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
+-	const skills = session.skills !== undefined ? [...session.skills] : undefined;
++	const available = agent.name === FRONTEND_AGENT_NAME ? withFrontendSkills(session.skills) : session.skills;
++	const skills = available !== undefined ? [...available] : undefined;
+ 	const autoloadSkills =
+ 		agent.autoloadSkills?.length && skills !== undefined
+ 			? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
+@@ -1207,7 +1210,9 @@ function buildExecutorOptions(
+ 		settings: session.settings,
+ 		asyncJobManager: session.asyncJobManager,
+ 		inheritedSessionAgents: session.getSessionAgents?.(),
+-		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
++		mcpManager: enableMCP
++			? session.mcpManager ?? (policy.agent.name === FRONTEND_AGENT_NAME ? undefined : MCPManager.instance())
++			: undefined,
+ 		mcpToolScope: session.mcpToolScope,
+ 		enableMCP,
+ 		customTools: request.customTools,
+diff --git a/src/tools/index.ts b/src/tools/index.ts
+index c13389d783504b191fad1cd191474933ba8b65d9..dc296a00a8364da129161bd2ef84edf00f2e9b26 100644
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -500,8 +500,10 @@ export interface ToolSession {
+ 	asyncJobManager?: AsyncJobManagerApi;
+ 	/** MCP manager visible to subagents without relying on the process-global singleton. */
+ 	mcpManager?: MCPManagerApi;
+-	/** This session's view of {@link mcpManager}; subagents it spawns start from it. Unset for the owner. */
++	/** This session's view of the manager; children inherit it. */
+ 	mcpToolScope?: MCPToolScope;
++	/** Frontend reads use this admitted manager, never global MCP state. */
++	mcpReadProfile?: "frontend";
+ 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
+ 	localProtocolOptions?: LocalProtocolOptions;
+ 	/** Settings instance for passing to subagents */

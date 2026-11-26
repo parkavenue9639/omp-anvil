@@ -1,0 +1,21 @@
+{
+  "name": "omp-model-routing",
+  "private": true,
+  "engines": {
+    "bun": ">=1.4.4"
+  },
+  "scripts": {
+    "omp:patched": "bun node_modules/@oh-my-pi/pi-coding-agent/src/cli.ts",
+    "host:check": "bun packages/host/scripts/host-patches.ts check",
+    "host:build": "bun packages/host/scripts/host-patches.ts build"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "19.0.1"
+  },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-coding-agent@19.0.1": "patches/@oh-my-pi%2Fpi-coding-agent@19.0.1.patch",
+    "@oh-my-pi/pi-ai@19.0.1": "patches/@oh-my-pi%2Fpi-ai@19.0.1.patch",
+    "@oh-my-pi/pi-tui@19.0.1": "patches/@oh-my-pi%2Fpi-tui@19.0.1.patch",
+    "@oh-my-pi/pi-utils@19.0.1": "patches/@oh-my-pi%2Fpi-utils@19.0.1.patch"
+  }
+}

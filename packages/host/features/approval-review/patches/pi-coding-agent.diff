@@ -1,0 +1,800 @@
+diff --git a/dist/types/extensibility/extensions/runner.d.ts b/dist/types/extensibility/extensions/runner.d.ts
+index 1d271a6cdc53ce5522d44b716816b63ea8ab8cef..fad0b25ef5494488c6cb642c7336b903724c4916 100644
+--- a/dist/types/extensibility/extensions/runner.d.ts
++++ b/dist/types/extensibility/extensions/runner.d.ts
+@@ -11,6 +11,7 @@ import type { SessionManager } from "../../session/session-manager.js";
+ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types.js";
+ import { type UserWaitTracker } from "./user-wait.js";
+ import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
++import type { ToolApprovalReviewEvent, ToolApprovalReviewResult } from "./types.js";
+ import type { AfterProviderResponseEvent, AssistantTextRenderer, AssistantThinkingRenderer, BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeProviderRequestEvent, BeforeProviderRequestEventResult, BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult, ContextEvent, Extension, ExtensionActions, ExtensionAgentIdentity, ExtensionAnnotationsAPI, ExtensionAnnotationsFactory, ExtensionCommandContext, ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionError, ExtensionEvent, ExtensionFlag, ExtensionMode, ExtensionRuntime, ExtensionShortcut, ExtensionUIContext, InputEvent, InputEventResult, CacheWarmingAction, CacheWarmingDecisionEvent, McpNotificationEvent, MessageRenderer, RegisteredCommand, RegisteredTool, ResourcesDiscoverEvent, SessionBeforeBranchResult, SessionBeforeCompactResult, SessionBeforeShutdownResult, SessionBeforeSwitchResult, SessionBeforeTreeResult, SessionCompactingResult, SessionStopEvent, SessionStopEventResult, ShortcutConflict, ToolCallEvent, ToolCallEventResult, ToolResultEvent, ToolResultEventResult, TranscriptPresenter, UserBashEvent, UserBashEventResult, UserPythonEvent, UserPythonEventResult } from "./types.js";
+ /** Combined result from all before_agent_start handlers */
+ interface BeforeAgentStartCombinedResult {
+@@ -415,6 +416,26 @@ export declare class ExtensionRunner {
+      * `agent` overrides `ctx.agent` when the tool runs for another agent sharing this runner.
+      */
+     emitToolCall(event: ToolCallEvent, signal?: AbortSignal, agent?: ExtensionAgentIdentity): Promise<ToolCallEventResult | undefined>;
++    /**
++     * Dedicated dispatch for `tool_approval_review` reviewers (registered via
++     * `pi.registerToolApprovalReviewer`). Unlike the generic `emit` broadcast —
++     * whose per-handler results are advisory and whose failures are logged and
++     * skipped — this gate is a decision:
++     *
++     * - deny-first: the first reviewer to return `{ decision: "deny" }` wins and
++     *   the remaining reviewers are skipped;
++     * - fail-closed: a reviewer that throws, times out, returns an invalid shape,
++     *   or is cut short by an aborted dispatch signal denies the call — a failed
++     *   review can never become an implicit allow;
++     * - `undefined` only when every reviewer abstained (or none is registered):
++     *   the caller hands the call back to the native interactive gate.
++     *
++     * Each reviewer runs under the same per-handler budget as `tool_call`
++     * handlers (`extensionHandlers.toolCallTimeoutMs`, default 30s), and an
++     * interactive dialog a reviewer opens pauses that budget like a `tool_call`
++     * dialog does.
++     */
++    emitToolApprovalReview(event: ToolApprovalReviewEvent, signal?: AbortSignal, agent?: ExtensionAgentIdentity): Promise<ToolApprovalReviewResult | undefined>;
+     emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined>;
+     emitUserPython(event: UserPythonEvent): Promise<UserPythonEventResult | undefined>;
+     private emitUserEvent;
+diff --git a/dist/types/extensibility/extensions/types.d.ts b/dist/types/extensibility/extensions/types.d.ts
+index 3d60edc1e502ed3b5802bb3c04786aa142941dce..96bcc5f4b306469b5b0622b9cc7b556d3b42fc7c 100644
+--- a/dist/types/extensibility/extensions/types.d.ts
++++ b/dist/types/extensibility/extensions/types.d.ts
+@@ -49,7 +49,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
+ import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
+ import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
+ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+-import type { ApprovalMode } from "../../tools/approval.js";
++import type { ApprovalMode, ToolTier } from "../../tools/approval.js";
+ import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
+ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback.js";
+ import type { EventBus } from "../../utils/event-bus.js";
+@@ -1125,6 +1125,56 @@ export interface ToolApprovalResolvedEvent {
+     approved: boolean;
+     reason?: string;
+ }
++/**
++ * A tool call reached the point where the host would otherwise prompt a human:
++ * native `allow`/`deny` policies, session grants, and the ACP/`xd://` bypasses
++ * have already run, and the call still resolves to `prompt`. Provider safety
++ * checks (computer tool) are never routed here — they stay with the interactive
++ * human gate.
++ *
++ * Dispatched only through the dedicated reviewer gate (`pi.registerToolApprovalReviewer`);
++ * `input` is an immutable snapshot of the exact arguments the tool will execute,
++ * so a reviewer cannot rewrite the call it is judging. Each reviewer receives
++ * its own clone — one reviewer's mutations never reach another reviewer or the
++ * executing tool.
++ */
++export interface ToolApprovalReviewEvent {
++    type: "tool_approval_review";
++    sessionId: string;
++    toolCallId: string;
++    toolName: string;
++    /**
++     * Provenance for the reviewer gate: the extension path of the RegisteredTool whose
++     * RegisteredToolAdapter is actually executing this call, snapshotted at construction
++     * (SDK-registered custom tools carry the `"<sdk>"` sentinel). Unset when the executing tool
++     * is not a RegisteredToolAdapter, e.g. native built-ins — a name-matching later
++     * registration never retags an in-flight instance.
++     */
++    toolExtensionPath?: string;
++    /** Immutable snapshot of the final effective arguments that will execute. */
++    input: unknown;
++    approvalMode: ApprovalMode;
++    /** Capability tier the call resolved to. */
++    tier: ToolTier;
++    /** Which approval resolver raised the prompt. */
++    source?: "tool" | "user" | "mode" | "restriction";
++    /** User-policy key (or `xd://` device key) the decision was resolved under. */
++    policyKey?: string;
++    /** Why the call needs approval, when a reason was recorded. */
++    reason?: string;
++    /** Cancellation of the underlying tool call; an aborted review settles fail-closed. */
++    signal?: AbortSignal;
++}
++/**
++ * A reviewer's verdict: `allow` approves this single call only, `deny` blocks it.
++ * A reviewer returning `undefined` abstains and hands the call back to the native
++ * interactive gate. A reviewer that throws, times out, or returns an invalid
++ * shape settles fail-closed (denied) — it can never become an implicit allow.
++ */
++export interface ToolApprovalReviewResult {
++    decision: "allow" | "deny";
++    reason?: string;
++}
+ /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
+ export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
+ /**
+@@ -1348,7 +1398,7 @@ export declare function isToolCallEventType<TName extends string, TInput extends
+     input: TInput;
+ };
+ /** Union of all event types */
+-export type ExtensionEvent = ResourcesDiscoverEvent | SessionEvent | ContextEvent | CacheWarmingDecisionEvent | BeforeProviderRequestEvent | AfterProviderResponseEvent | BeforeAgentStartEvent | BeforeSubagentSpawnEvent | AgentStartEvent | AgentEndEvent | SessionStopEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | AssistantMessageRewriteEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | TtsrTriggeredEvent | TodoReminderEvent | GoalUpdatedEvent | CredentialDisabledEvent | McpNotificationEvent | LinkActivateEvent | UserBashEvent | UserPythonEvent | InputEvent | ToolCallEvent | ToolResultEvent | ToolApprovalRequestedEvent | ToolApprovalResolvedEvent | PlanReviewRequestedEvent | PlanReviewResolvedEvent | ModeChangedEvent;
++export type ExtensionEvent = ResourcesDiscoverEvent | SessionEvent | ContextEvent | CacheWarmingDecisionEvent | BeforeProviderRequestEvent | AfterProviderResponseEvent | BeforeAgentStartEvent | BeforeSubagentSpawnEvent | AgentStartEvent | AgentEndEvent | SessionStopEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | AssistantMessageRewriteEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | TtsrTriggeredEvent | TodoReminderEvent | GoalUpdatedEvent | CredentialDisabledEvent | McpNotificationEvent | LinkActivateEvent | UserBashEvent | UserPythonEvent | InputEvent | ToolCallEvent | ToolResultEvent | ToolApprovalRequestedEvent | ToolApprovalResolvedEvent | ToolApprovalReviewEvent | PlanReviewRequestedEvent | PlanReviewResolvedEvent | ModeChangedEvent;
+ export interface ContextEventResult {
+     messages?: AgentMessage[];
+ }
+@@ -1493,6 +1543,7 @@ export interface ExtensionAPI {
+     on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+     on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
+     on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
++    on(event: "tool_approval_review", handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>): void;
+     on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
+     on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
+     on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
+@@ -1504,6 +1555,22 @@ export interface ExtensionAPI {
+     on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
+     /** Register a tool that the LLM can call. */
+     registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
++    /**
++     * Register an approval reviewer consulted when a tool call would otherwise
++     * prompt a human: after native `allow`/`deny` policies, session grants, and
++     * the ACP/`xd://` bypasses all ran, the call still resolves to `prompt`.
++     *
++     * The reviewer receives an immutable snapshot of the exact arguments that will
++     * execute (`ToolApprovalReviewEvent.input`); it cannot rewrite the call. Return
++     * `{ decision: "allow" }` to approve this single call — nothing is cached, no
++     * session grant is recorded, the next call asks again — `{ decision: "deny" }`
++     * to block it, or `undefined` to abstain and hand the call back to the native
++     * interactive gate. Reviewers run deny-first: any `deny` wins over every allow.
++     * A reviewer that throws, times out, or returns an invalid shape settles
++     * fail-closed; the call is denied, never silently allowed. Provider safety
++     * checks stay with the human gate and never reach reviewers.
++     */
++    registerToolApprovalReviewer(handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>): void;
+     /**
+      * Register a fallback writer consulted when a native `write`/`edit` byte-write is
+      * denied with a permission error (`EPERM`/`EACCES`/`EROFS`). Every other write
+diff --git a/dist/types/extensibility/extensions/wrapper.d.ts b/dist/types/extensibility/extensions/wrapper.d.ts
+index aa06acf1303bb175d22bbc6de0ee9ac47191ab2f..138ab74a6583e70970660ec2ddda2ab2ac1acceb 100644
+--- a/dist/types/extensibility/extensions/wrapper.d.ts
++++ b/dist/types/extensibility/extensions/wrapper.d.ts
+@@ -20,6 +20,12 @@ export declare class RegisteredToolAdapter implements AgentTool<any, any, any> {
+     renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+     onResultAction: ((event: ToolResultActionEvent<any, any>) => void | Promise<void>) | undefined;
+     readonly loadMode: ToolLoadMode;
++    /**
++     * Construction-time snapshot of RegisteredTool.extensionPath: the provenance an approval
++     * reviewer sees for this exact executing instance. Copied as a string so a later same-name
++     * registration (or any mutation of the RegisteredTool record) cannot rewrite it.
++     */
++    readonly approvalExtensionPath: string;
+     constructor(registeredTool: RegisteredTool, runner: ExtensionRunner);
+     execute(toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: AgentToolUpdateCallback<any>, context?: AgentToolContext): Promise<AgentToolResult<unknown, unknown>>;
+ }
+diff --git a/dist/types/tools/index.d.ts b/dist/types/tools/index.d.ts
+index ebe67542f056cf92e576d8e9a842ad4f73c7dd8d..ccae64279528b92686a68e30c38d3dcdec12dde8 100644
+--- a/dist/types/tools/index.d.ts
++++ b/dist/types/tools/index.d.ts
+@@ -9,7 +9,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes.js";
+ import type { PromptTemplate } from "../config/prompt-templates.js";
+ import type { Settings } from "../config/settings.js";
+ import type { ToolPathWithSource } from "../extensibility/custom-tools/index.js";
+-import type { BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult, PreparedExtension } from "../extensibility/extensions/types.js";
++import type { BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult, PreparedExtension, ToolApprovalReviewEvent, ToolApprovalReviewResult } from "../extensibility/extensions/types.js";
+ import type { Skill, SkillRediscoveryHost } from "../extensibility/skills.js";
+ import type { GoalModeState, GoalRuntime } from "../goals/index.js";
+ import type { HindsightSessionState } from "../hindsight/state.js";
+@@ -392,6 +392,16 @@ export interface ToolSession {
+      * session has no extension runner.
+      */
+     emitBeforeSubagentSpawn?(event: BeforeSubagentSpawnEvent, signal?: AbortSignal): Promise<BeforeSubagentSpawnEventResult | undefined>;
++    /**
++     * Consult this session's registered tool-approval reviewers
++     * (`pi.registerToolApprovalReviewer`). Bound by the SDK to the session's
++     * extension runner so approval gates outside the tool wrapper (eval
++     * prelude host calls) pass the same `tool_approval_review` gate as wrapper
++     * approvals. Returns the deny-first verdict, or `undefined` when no
++     * reviewer is registered or every reviewer abstained — callers then fall
++     * back to the native interactive gate. Dispatch failures deny fail-closed.
++     */
++    consultApprovalReviewers?(event: ToolApprovalReviewEvent, signal?: AbortSignal): Promise<ToolApprovalReviewResult | undefined>;
+     /** Auth storage for passing to subagents (avoids re-discovery) */
+     authStorage?: import("../session/auth-storage.js").AuthStorage;
+     /** Model registry for passing to subagents (avoids re-discovery) */
+diff --git a/src/eval/preludes.ts b/src/eval/preludes.ts
+index 63ed028acb3594bc7c787470d8b609883c341a10..f130712a5072d0343e65aaaa8fd9969bad5d7b37 100644
+--- a/src/eval/preludes.ts
++++ b/src/eval/preludes.ts
+@@ -173,6 +173,41 @@ async function approvePreludeInvocation(
+ 	if (resolved.policy === "deny") throw denyError(resolved, definition.name);
+ 	if (resolved.policy !== "prompt") return;
+ 
++	// Same reviewer gate as the wrapper's approval check: a registered reviewer
++	// decides the prompt path (an allow executes without asking, a deny blocks),
++	// an abstention falls through to the interactive prompt below. The dispatch
++	// clones `parameters` once per reviewer (mutations cannot reach execution or
++	// another reviewer), and a dispatch cancelled mid-review or a snapshot that
++	// cannot be produced settles fail-closed inside the dispatch itself.
++	const consult = context.session.consultApprovalReviewers;
++	if (consult !== undefined) {
++		const review = await untilAborted(context.signal, () =>
++			consult(
++				{
++					type: "tool_approval_review",
++					sessionId: context.context?.sessionManager?.getSessionId() ?? "",
++					toolCallId: context.toolCallId,
++					toolName: definition.name,
++					input: parameters,
++					approvalMode: mode,
++					tier: resolved.tier,
++					...(resolved.source ? { source: resolved.source } : {}),
++					...(resolved.policyKey ? { policyKey: resolved.policyKey } : {}),
++					...(resolved.reason ? { reason: resolved.reason } : {}),
++					...(context.signal ? { signal: context.signal } : {}),
++				},
++				context.signal,
++			),
++		);
++		if (review?.decision === "allow") return;
++		if (review !== undefined) {
++			throw new Error(
++				`Eval prelude call denied by approval reviewer: ${definition.name}` +
++					(review.reason ? `\nReason: ${review.reason}` : ""),
++			);
++		}
++	}
++
+ 	const ui = context.context?.ui;
+ 	if (!ui || context.context?.hasUI === false) {
+ 		throw new Error(
+diff --git a/src/extensibility/extensions/loader.ts b/src/extensibility/extensions/loader.ts
+index 100c3fee4df386269ee57e784bc44104b0e512e6..1e05b7fce1b8781016a031e2cde4a76986288506 100644
+--- a/src/extensibility/extensions/loader.ts
++++ b/src/extensibility/extensions/loader.ts
+@@ -47,6 +47,7 @@ import type {
+ 	ExtensionAPI,
+ 	ExtensionContext,
+ 	ExtensionFactory,
++	ExtensionHandler,
+ 	ExtensionRuntime as IExtensionRuntime,
+ 	LoadExtensionsResult,
+ 	MessageRenderer,
+@@ -55,6 +56,8 @@ import type {
+ 	RegisteredCommand,
+ 	ShortcutConflict,
+ 	SourceInfo,
++	ToolApprovalReviewEvent,
++	ToolApprovalReviewResult,
+ 	ToolDefinition,
+ 	ToolInfo,
+ 	TranscriptPresenter,
+@@ -255,6 +258,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+ 		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
+ 	}
+ 
++	registerToolApprovalReviewer(handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>): void {
++		// Stored under the dedicated `tool_approval_review` event type and dispatched
++		// only through `ExtensionRunner.emitToolApprovalReview`, whose deny-first
++		// fail-closed semantics the generic `emit` broadcast cannot provide.
++		this.on("tool_approval_review", handler);
++	}
++
+ 	registerFileWriteFallback(handler: FileWriteFallbackHandler): void {
+ 		this.extension.fileWriteFallbackHandlers.push(handler);
+ 	}
+diff --git a/src/extensibility/extensions/runner.ts b/src/extensibility/extensions/runner.ts
+index 6bf4183d3f165907906fa8ce10d9e7cd9cc326da..6f9e489a3e4f503a0f3006e5bc41efc901e9a2a7 100644
+--- a/src/extensibility/extensions/runner.ts
++++ b/src/extensibility/extensions/runner.ts
+@@ -106,6 +106,8 @@ import type {
+ 	SessionStopEvent,
+ 	SessionStopEventResult,
+ 	ShortcutConflict,
++	ToolApprovalReviewEvent,
++	ToolApprovalReviewResult,
+ 	ToolCallEvent,
+ 	ToolCallEventResult,
+ 	ToolRegistrationListener,
+@@ -162,6 +164,18 @@ function normalizeHandlerTimeout(timeoutMs: number): number {
+ 	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : EXTENSION_HANDLER_TIMEOUT_MS;
+ }
+ 
++/**
++ * Reviewer verdict shape check for `tool_approval_review`. Only `undefined`
++ * abstains; anything else must be `{ decision: "allow" | "deny", reason? }` —
++ * an invalid shape is a failed review and settles fail-closed, never allow.
++ */
++function isApprovalReviewResult(value: unknown): value is ToolApprovalReviewResult {
++	if (typeof value !== "object" || value === null) return false;
++	const { decision, reason } = value as Record<string, unknown>;
++	if (decision !== "allow" && decision !== "deny") return false;
++	return reason === undefined || typeof reason === "string";
++}
++
+ /**
+  * Dedicated cap for `session_shutdown` handlers. The generic 30s budget is
+  * appropriate for events extensions can observe (e.g. `session_start`,
+@@ -462,6 +476,7 @@ type RunnerEmitEvent = Exclude<
+ 	ExtensionEvent,
+ 	| ToolCallEvent
+ 	| ToolResultEvent
++	| ToolApprovalReviewEvent
+ 	| UserBashEvent
+ 	| ContextEvent
+ 	| CacheWarmingDecisionEvent
+@@ -1990,7 +2005,7 @@ export class ExtensionRunner {
+ 							const handlerContext = createHandlerContext(
+ 								ctx,
+ 								handlerSignal,
+-								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
++								event.type === "tool_call" || event.type === "tool_approval_review" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
+ 							);
+ 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
+ 								handler(event, handlerContext),
+@@ -2405,6 +2420,85 @@ export class ExtensionRunner {
+ 		return buildAggregatedToolCallResult(result, aggregated);
+ 	}
+ 
++	/**
++	 * Dedicated dispatch for `tool_approval_review` reviewers (registered via
++	 * `pi.registerToolApprovalReviewer`). Unlike the generic `emit` broadcast —
++	 * whose per-handler results are advisory and whose failures are logged and
++	 * skipped — this gate is a decision:
++	 *
++	 * - deny-first: the first reviewer to return `{ decision: "deny" }` wins and
++	 *   the remaining reviewers are skipped;
++	 * - fail-closed: a reviewer that throws, times out, returns an invalid shape,
++	 *   or is cut short by an aborted dispatch signal denies the call — a failed
++	 *   review can never become an implicit allow;
++	 * - `undefined` only when every reviewer abstained (or none is registered):
++	 *   the caller hands the call back to the native interactive gate.
++	 *
++	 * Every handler receives its own event with an independently cloned `input`
++	 * snapshot, so an earlier reviewer can neither mutate what a later reviewer
++	 * judges nor what the caller executes; a snapshot that cannot be produced
++	 * denies fail-closed rather than silently abstaining. Each reviewer runs
++	 * under the same per-handler budget as `tool_call` handlers
++	 * (`extensionHandlers.toolCallTimeoutMs`, default 30s), and an interactive
++	 * dialog a reviewer opens pauses that budget like a `tool_call` dialog does.
++	 * `agent` reports the identity the reviewed tool runs for when a shared
++	 * runner serves more than one agent (e.g. an advisor toolset).
++	 */
++	async emitToolApprovalReview(
++		event: ToolApprovalReviewEvent,
++		signal?: AbortSignal,
++		agent?: ExtensionAgentIdentity,
++	): Promise<ToolApprovalReviewResult | undefined> {
++		if (!this.hasHandlers("tool_approval_review")) return undefined;
++		const ctx = this.createContext(undefined, undefined, agent);
++		const timeoutMs = normalizeHandlerTimeout(
++			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
++				extensionHandlerTimeoutMs,
++		);
++		const failClosed = (reason: string): ToolApprovalReviewResult => ({ decision: "deny", reason });
++		let allowed: ToolApprovalReviewResult | undefined;
++		for (const ext of this.extensions) {
++			const handlers = ext.handlers.get("tool_approval_review");
++			if (!handlers || handlers.length === 0) continue;
++			for (const handler of handlers) {
++				// Independent snapshot per handler, cloned from the caller's event:
++				// a reviewer can neither mutate the input a later reviewer judges nor
++				// the object the caller executes. Clone failure denies fail-closed.
++				let snapshot: unknown;
++				try {
++					snapshot = structuredClone(event.input);
++				} catch {
++					return failClosed("approval reviewer input snapshot failed");
++				}
++				const handlerEvent: ToolApprovalReviewEvent = { ...event, input: snapshot };
++				const handlerResult = await this.#runHandlerWithTimeout(
++					handler,
++					handlerEvent,
++					ctx,
++					ext,
++					timeoutMs,
++					(kind, message) =>
++						failClosed(
++							kind === "timeout"
++								? `approval reviewer timed out after ${timeoutMs}ms`
++								: `approval reviewer failed: ${message}`,
++						),
++					signal,
++				);
++				// A dispatch cancelled while a reviewer was pending must not fall
++				// through to the native gate as though the reviewer had abstained.
++				if (signal?.aborted) return failClosed("approval review cancelled");
++				if (handlerResult === undefined) continue; // active abstention
++				if (!isApprovalReviewResult(handlerResult)) {
++					return failClosed("approval reviewer returned an invalid result");
++				}
++				if (handlerResult.decision === "deny") return handlerResult;
++				allowed ??= handlerResult;
++			}
++		}
++		return allowed;
++	}
++
+ 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
+ 		return this.emitUserEvent<UserBashEventResult>(event, "user_bash");
+ 	}
+diff --git a/src/extensibility/extensions/types.ts b/src/extensibility/extensions/types.ts
+index e8826536f52f23414ed0014b3600097106529f88..a42cb18f1b19f70a1f9dcea1f19db3b5342cee15 100644
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -106,7 +106,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
+ import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
+ import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
+ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+-import type { ApprovalMode } from "../../tools/approval";
++import type { ApprovalMode, ToolTier } from "../../tools/approval";
+ import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
+ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
+ import type { EventBus } from "../../utils/event-bus";
+@@ -1489,6 +1489,56 @@ export interface ToolApprovalResolvedEvent {
+ 	reason?: string;
+ }
+ 
++/**
++ * A tool call reached the point where the host would otherwise prompt a human:
++ * native `allow`/`deny` policies, session grants, and the ACP/`xd://` bypasses
++ * have already run, and the call still resolves to `prompt`. Provider safety
++ * checks (computer tool) are never routed here — they stay with the interactive
++ * human gate.
++ *
++ * Dispatched only through the dedicated reviewer gate (`pi.registerToolApprovalReviewer`);
++ * `input` is an immutable snapshot of the exact arguments the tool will execute,
++ * so a reviewer cannot rewrite the call it is judging. Each reviewer receives
++ * its own clone — one reviewer's mutations never reach another reviewer or the
++ * executing tool.
++ */
++export interface ToolApprovalReviewEvent {
++	type: "tool_approval_review";
++	sessionId: string;
++	toolCallId: string;
++	toolName: string;
++	/** Provenance for the reviewer gate: the extension path of the {@link RegisteredTool} whose
++	 *  RegisteredToolAdapter is actually executing this call, snapshotted at construction
++	 *  (SDK-registered custom tools carry the `"<sdk>"` sentinel). Unset when the executing tool
++	 *  is not a RegisteredToolAdapter, e.g. native built-ins — a name-matching later
++	 *  registration never retags an in-flight instance. */
++	toolExtensionPath?: string;
++	/** Immutable snapshot of the final effective arguments that will execute. */
++	input: unknown;
++	approvalMode: ApprovalMode;
++	/** Capability tier the call resolved to. */
++	tier: ToolTier;
++	/** Which approval resolver raised the prompt. */
++	source?: "tool" | "user" | "mode" | "restriction";
++	/** User-policy key (or `xd://` device key) the decision was resolved under. */
++	policyKey?: string;
++	/** Why the call needs approval, when a reason was recorded. */
++	reason?: string;
++	/** Cancellation of the underlying tool call; an aborted review settles fail-closed. */
++	signal?: AbortSignal;
++}
++
++/**
++ * A reviewer's verdict: `allow` approves this single call only, `deny` blocks it.
++ * A reviewer returning `undefined` abstains and hands the call back to the native
++ * interactive gate. A reviewer that throws, times out, or returns an invalid
++ * shape settles fail-closed (denied) — it can never become an implicit allow.
++ */
++export interface ToolApprovalReviewResult {
++	decision: "allow" | "deny";
++	reason?: string;
++}
++
+ /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
+ export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
+ /**
+@@ -1767,6 +1817,7 @@ export type ExtensionEvent =
+ 	| ToolResultEvent
+ 	| ToolApprovalRequestedEvent
+ 	| ToolApprovalResolvedEvent
++	| ToolApprovalReviewEvent
+ 	| PlanReviewRequestedEvent
+ 	| PlanReviewResolvedEvent
+ 	| ModeChangedEvent;
+@@ -1992,6 +2043,7 @@ export interface ExtensionAPI {
+ 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+ 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
+ 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
++	on(event: "tool_approval_review", handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>): void;
+ 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
+ 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
+ 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
+@@ -2009,6 +2061,23 @@ export interface ExtensionAPI {
+ 	/** Register a tool that the LLM can call. */
+ 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
+ 
++	/**
++	 * Register an approval reviewer consulted when a tool call would otherwise
++	 * prompt a human: after native `allow`/`deny` policies, session grants, and
++	 * the ACP/`xd://` bypasses all ran, the call still resolves to `prompt`.
++	 *
++	 * The reviewer receives an immutable snapshot of the exact arguments that will
++	 * execute (`ToolApprovalReviewEvent.input`); it cannot rewrite the call. Return
++	 * `{ decision: "allow" }` to approve this single call — nothing is cached, no
++	 * session grant is recorded, the next call asks again — `{ decision: "deny" }`
++	 * to block it, or `undefined` to abstain and hand the call back to the native
++	 * interactive gate. Reviewers run deny-first: any `deny` wins over every allow.
++	 * A reviewer that throws, times out, or returns an invalid shape settles
++	 * fail-closed; the call is denied, never silently allowed. Provider safety
++	 * checks stay with the human gate and never reach reviewers.
++	 */
++	registerToolApprovalReviewer(handler: ExtensionHandler<ToolApprovalReviewEvent, ToolApprovalReviewResult>): void;
++
+ 	/**
+ 	 * Register a fallback writer consulted when a native `write`/`edit` byte-write is
+ 	 * denied with a permission error (`EPERM`/`EACCES`/`EROFS`). Every other write
+diff --git a/src/extensibility/extensions/wrapper.ts b/src/extensibility/extensions/wrapper.ts
+index fa3ba79c81bf81a8463778530f3cabeb02ae8105..4c6579375f47dfdc58680a849cd6b6639e2fad1e 100644
+--- a/src/extensibility/extensions/wrapper.ts
++++ b/src/extensibility/extensions/wrapper.ts
+@@ -82,6 +82,10 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+ 	onResultAction: ((event: ToolResultActionEvent<any, any>) => void | Promise<void>) | undefined = undefined;
+ 	readonly loadMode: ToolLoadMode;
++	/** Construction-time snapshot of {@link RegisteredTool.extensionPath}: the provenance an
++	 *  approval reviewer sees for this exact executing instance. Copied as a string so a later
++	 *  same-name registration (or any mutation of the RegisteredTool record) cannot rewrite it. */
++	readonly approvalExtensionPath: string;
+ 
+ 	constructor(
+ 		private registeredTool: RegisteredTool,
+@@ -89,7 +93,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 	) {
+ 		applyToolProxy(registeredTool.definition, this);
+ 		this.loadMode = defaultLoadModeForToolName(registeredTool.definition.name, registeredTool.definition.loadMode);
+-
++		this.approvalExtensionPath = registeredTool.extensionPath;
+ 		// Only define render methods when the underlying definition provides them.
+ 		// If these exist unconditionally on the prototype, ToolExecutionComponent
+ 		// enters the custom-renderer path, gets undefined back, and silently
+@@ -458,70 +462,123 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
+ 				});
+ 			};
+ 
+-			// Provider safety checks fail closed without an interactive prompt. Unlike
+-			// ordinary tier approval, no setting or yolo mode may bypass this gate.
+-			if (!this.runner.hasUI()) {
+-				const reason = "no interactive UI available";
+-				await emitApprovalResolved(false, reason);
+-				cancelPreflight();
+-				if (pendingSafetyChecks.length > 0) {
+-					throw new Error(
+-						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
+-					);
++			// Approval reviewers (`pi.registerToolApprovalReviewer`) decide the ordinary
++			// prompt path in place of the interactive gate — never provider safety
++			// checks, which remain exclusively human. Dispatching before the no-UI
++			// check lets a reviewer decide headless calls; an abstention (`undefined`)
++			// falls through to the native gate below unchanged. The dispatch clones
++			// `effectiveParams` once per reviewer: they approve exactly what executes
++			// and cannot rewrite it. An allow approves this one call only — no session
++			// grant, no cached target is recorded.
++			let reviewerApproved = false;
++			if (pendingSafetyChecks.length === 0 && this.runner.hasHandlers("tool_approval_review")) {
++				const review = await this.runner.emitToolApprovalReview(
++					{
++						type: "tool_approval_review",
++						sessionId,
++						toolName: this.tool.name,
++						// Provenance for the reviewer gate: taken only from the actually-executing
++						// RegisteredToolAdapter's construction-time snapshot — never from the
++						// definition's sourcePath or a name-based registry lookup, so a late
++						// same-name registration cannot retag an in-flight call. Builtin and other
++						// non-adapted tools leave the field unset.
++						...(this.tool instanceof RegisteredToolAdapter
++							? { toolExtensionPath: this.tool.approvalExtensionPath }
++							: {}),
++						toolCallId,
++						input: effectiveParams,
++						approvalMode,
++						tier: resolved.tier,
++						...(resolved.source ? { source: resolved.source } : {}),
++						...(resolved.policyKey ? { policyKey: resolved.policyKey } : {}),
++						...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
++						...(signal ? { signal } : {}),
++					},
++					signal,
++					this.#agent,
++				);
++				if (review?.decision === "allow") {
++					reviewerApproved = true;
++					await emitApprovalResolved(true, review.reason);
++					// The resolved-notification await above can straddle a cancellation:
++					// an approval that is already aborted must never reach execution,
++					// whatever the reviewer decided.
++					if (signal?.aborted) {
++						cancelPreflight();
++						throw new Error(`Tool call cancelled during approval: ${this.tool.name}`);
++					}
++				} else if (review !== undefined) {
++					const reason = review.reason ?? "denied by approval reviewer";
++					await emitApprovalResolved(false, reason);
++					cancelPreflight();
++					throw new Error(`Tool call denied by approval reviewer: ${this.tool.name}\nReason: ${reason}`);
+ 				}
+-				if (resolved.source === "restriction") {
++			}
++
++			if (!reviewerApproved) {
++				// Provider safety checks fail closed without an interactive prompt. Unlike
++				// ordinary tier approval, no setting or yolo mode may bypass this gate.
++				if (!this.runner.hasUI()) {
++					const reason = "no interactive UI available";
++					await emitApprovalResolved(false, reason);
++					cancelPreflight();
++					if (pendingSafetyChecks.length > 0) {
++						throw new Error(
++							`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
++						);
++					}
++					if (resolved.source === "restriction") {
++						throw new Error(
++							`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
++								`Reason: ${resolved.reason}\n` +
++								`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
++						);
++					}
+ 					throw new Error(
+ 						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+-							`Reason: ${resolved.reason}\n` +
+-							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
++							`Options:\n` +
++							`  1. Set tools.approvalMode: yolo in /settings\n` +
++							`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
++							`  3. Use an interactive UI to approve the tool call`,
+ 					);
+ 				}
+-				throw new Error(
+-					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+-						`Options:\n` +
+-						`  1. Set tools.approvalMode: yolo in /settings\n` +
+-						`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
+-						`  3. Use an interactive UI to approve the tool call`,
+-				);
+-			}
+ 
+-			const uiContext = this.runner.getUIContext();
+-			const safetyAppendix =
+-				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
+-			let approved: boolean;
+-			try {
+-				// The call's signal closes the prompt: aborting the turn (Esc, a session switch) must not
+-				// wait on an approval the user can no longer see or answer.
+-				const answer = await untilAborted(signal, () =>
+-					requestApproval(uiContext, this.tool, resolvedArgs, {
+-						reason: approvalCheck.reason,
+-						appendix: safetyAppendix,
+-						sessionSubject: sessionScope?.subject,
+-						grants: cacheTargets,
+-						signal,
+-					}),
+-				);
+-				approved = answer !== "deny";
+-				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);
+-				if (typeof answer === "object" && approvalGrants) {
+-					recordApprovalGrant(this.tool, resolvedArgs, approvalGrants, resolved.tier, answer);
++				const uiContext = this.runner.getUIContext();
++				const safetyAppendix =
++					pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
++				let approved: boolean;
++				try {
++					const answer = await untilAborted(signal, () =>
++						requestApproval(uiContext, this.tool, resolvedArgs, {
++							reason: approvalCheck.reason,
++							appendix: safetyAppendix,
++							sessionSubject: sessionScope?.subject,
++							grants: cacheTargets,
++							signal,
++						}),
++					);
++					approved = answer !== "deny";
++					if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);
++					if (typeof answer === "object" && approvalGrants) {
++						recordApprovalGrant(this.tool, resolvedArgs, approvalGrants, resolved.tier, answer);
++					}
++				} catch (err) {
++					await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
++					cancelPreflight();
++					throw err;
+ 				}
+-			} catch (err) {
+-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+-				cancelPreflight();
+-				throw err;
+-			}
+-			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
+-			if (!approved) {
+-				cancelPreflight();
+-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+-			}
+-			if (pendingSafetyChecks.length > 0) {
+-				if (!context) {
++				await emitApprovalResolved(approved, approved ? undefined : "denied by user");
++				if (!approved) {
+ 					cancelPreflight();
+-					throw new Error("Provider safety approval context is unavailable");
++					throw new Error(`Tool call denied by user: ${this.tool.name}`);
++				}
++				if (pendingSafetyChecks.length > 0) {
++					if (!context) {
++						cancelPreflight();
++						throw new Error("Provider safety approval context is unavailable");
++					}
++					context.providerSafetyApproved = true;
+ 				}
+-				context.providerSafetyApproved = true;
+ 			}
+ 		}
+ 
+diff --git a/src/sdk.ts b/src/sdk.ts
+index f49c802cc71ad79729b9b5ec38e0f6dcec8d131c..b75e12b40e2076bfbc42513867573d6bd03a558e 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -2798,6 +2798,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			getClientBridge: () => session?.clientBridge,
+ 			emitBeforeSubagentSpawn: (event, signal) =>
+ 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
++			// Approval reviewers on this session's runner, so eval-prelude host
++			// calls pass the same `tool_approval_review` gate as wrapper approvals.
++			// Advisors and any session forwarding this ToolSession inherit the
++			// binding, matching how they share the primary's extension runner.
++			consultApprovalReviewers: (event, signal) =>
++				session?.extensionRunner?.emitToolApprovalReview(event, signal) ?? Promise.resolve(undefined),
+ 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
+ 			openAsyncNotify: job => session?.openAsyncNotify(job) ?? (() => {}),
+ 			queueServiceNotify: entry => session?.queueServiceNotify(entry),
+@@ -5363,6 +5369,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			// write transport), so xd:// devices are unreachable. Images are inlined,
+ 			// and the provider boundary handles text-only advisor models.
+ 			xdev: undefined,
++			// Advisor calls must retain the advisor identity, not the primary's.
++			consultApprovalReviewers: (event, signal) =>
++				session?.extensionRunner?.emitToolApprovalReview(event, signal, advisorAgent) ??
++				Promise.resolve(undefined),
+ 			// Each slate binds its own predicate in `create`. The primary's active
+ 			// set, and the callback that mutates it, are not advisor state.
+ 			isToolActive: undefined,
+diff --git a/src/speculation/host.ts b/src/speculation/host.ts
+index 698bf5885b1f99b09907618cd63623ea26000ae2..edf1297e6d361d2f57e48339ff02124e70cb8987 100644
+--- a/src/speculation/host.ts
++++ b/src/speculation/host.ts
+@@ -78,7 +78,8 @@ function hasLifecycleHandlers(runner: SpeculationLifecycle): boolean {
+ 		runner.hasHandlers("tool_call") ||
+ 		runner.hasHandlers("tool_result") ||
+ 		runner.hasHandlers("tool_approval_requested") ||
+-		runner.hasHandlers("tool_approval_resolved")
++		runner.hasHandlers("tool_approval_resolved") ||
++		runner.hasHandlers("tool_approval_review")
+ 	);
+ }
+ function sameResourceState(left: nodeFs.Stats, right: nodeFs.Stats): boolean {
+diff --git a/src/tools/index.ts b/src/tools/index.ts
+index 5e48e1198755537f8acd98cd5bdb43137b489d32..304971c4ed1ec134b872b1e556add79bfa0fbeda 100644
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -16,6 +16,8 @@ import type {
+ 	BeforeSubagentSpawnEvent,
+ 	BeforeSubagentSpawnEventResult,
+ 	PreparedExtension,
++	ToolApprovalReviewEvent,
++	ToolApprovalReviewResult,
+ } from "../extensibility/extensions/types";
+ import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
+ import type { GoalModeState, GoalRuntime } from "../goals";
+@@ -473,6 +475,19 @@ export interface ToolSession {
+ 		event: BeforeSubagentSpawnEvent,
+ 		signal?: AbortSignal,
+ 	): Promise<BeforeSubagentSpawnEventResult | undefined>;
++	/**
++	 * Consult this session's registered tool-approval reviewers
++	 * (`pi.registerToolApprovalReviewer`). Bound by the SDK to the session's
++	 * extension runner so approval gates outside the tool wrapper (eval
++	 * prelude host calls) pass the same `tool_approval_review` gate as wrapper
++	 * approvals. Returns the deny-first verdict, or `undefined` when no
++	 * reviewer is registered or every reviewer abstained — callers then fall
++	 * back to the native interactive gate. Dispatch failures deny fail-closed.
++	 */
++	consultApprovalReviewers?(
++		event: ToolApprovalReviewEvent,
++		signal?: AbortSignal,
++	): Promise<ToolApprovalReviewResult | undefined>;
+ 	/** Auth storage for passing to subagents (avoids re-discovery) */
+ 	authStorage?: import("../session/auth-storage").AuthStorage;
+ 	/** Model registry for passing to subagents (avoids re-discovery) */

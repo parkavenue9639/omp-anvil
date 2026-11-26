@@ -1,0 +1,1506 @@
+diff --git a/dist/types/modes/agents-hub-deps.d.ts b/dist/types/modes/agents-hub-deps.d.ts
+index 07a9548d4fc194587477712679b6048e7c360940..9a2a23c2a44a4ac383ca904db86f5278ce8d7889 100644
+--- a/dist/types/modes/agents-hub-deps.d.ts
++++ b/dist/types/modes/agents-hub-deps.d.ts
+@@ -3,4 +3,6 @@ import type { AgentsHubDeps } from "@oh-my-pi/pi-tui/overlays/agents-hub";
+ import type { EffectiveExtensionRoots } from "../capability/types.js";
+ import type { ModelRegistry } from "../config/model-registry.js";
+ import type { Settings } from "../config/settings.js";
++/** Validate before touching either the persistent map or session-only picks. */
++export declare function setAgentModelOverride(settings: Settings, name: string, value: string | undefined, persist: boolean): void;
+ export declare function createAgentsHubDeps(cwd: string, settings: Settings, modelRegistry: ModelRegistry, extensionRoots: () => EffectiveExtensionRoots, activeModelPattern?: string, defaultModelPattern?: string, sessionServiceTier?: (model: Model) => ServiceTier | undefined): AgentsHubDeps;
+diff --git a/dist/types/modes/components/agent-role-selector.d.ts b/dist/types/modes/components/agent-role-selector.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..868b7b511bee3472b1f1ddc10061d8486a1f2a7c
+--- /dev/null
++++ b/dist/types/modes/components/agent-role-selector.d.ts
+@@ -0,0 +1,8 @@
++import type { Component, DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui";
++/** A role binding, not a concrete-model or effort selection. */
++export declare class AgentRoleSelectorComponent implements Component {
++    constructor(roles: readonly string[], current: string | undefined, onSelect: (role: string | undefined) => void, onCancel: () => void);
++    handleInput(data: string): void;
++    describe(cx: DescribeContext): NativeNode | null;
++    handleNativeEvent(event: NativeUiEvent): void;
++}
+diff --git a/dist/types/task/agents.d.ts b/dist/types/task/agents.d.ts
+index ab551d23704edd8eafc227659ada4952dd8d47ea..203555aa27476c30c2e88f3b3751dba5ba751644 100644
+--- a/dist/types/task/agents.d.ts
++++ b/dist/types/task/agents.d.ts
+@@ -1,5 +1,8 @@
+ import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+ import type { AgentDefinition } from "./types.js";
++export declare function isManagedPresetName(name: string): boolean;
++/** Return the effective managed role, rejecting overrides that replace its role plan. */
++export declare function resolveManagedPresetRole(agent: Pick<AgentDefinition, "name" | "model">, settingsOverride?: string | string[]): string | undefined;
+ export declare class AgentParsingError extends Error {
+     readonly source?: unknown;
+     constructor(error: Error, source?: unknown);
+diff --git a/src/modes/agents-hub-deps.ts b/src/modes/agents-hub-deps.ts
+index 17f17c8baa4b2f4e73befcbe08628b118a639337..8e8fffba4946dd55abf7552970038089dbda5df9 100644
+--- a/src/modes/agents-hub-deps.ts
++++ b/src/modes/agents-hub-deps.ts
+@@ -17,10 +17,12 @@ import {
+ 	resolveModelOverride,
+ } from "../config/model-resolver";
+ import type { Settings } from "../config/settings";
++import { cfgModelRoles } from "../config/model-settings";
+ import agentCreationArchitectPrompt from "../prompts/system/agent-creation-architect.md" with { type: "text" };
+ import agentCreationUserPrompt from "../prompts/system/agent-creation-user.md" with { type: "text" };
+ import { createAgentSession } from "../sdk";
+ import { refreshAgentDiscovery } from "../task";
++import { isManagedPresetName, parseAgent, resolveManagedPresetRole } from "../task/agents";
+ import { discoverAgents } from "../task/discovery";
+ import { resolveAgentPrewalkDefault } from "../task/prewalk";
+ import { createModelBrowserSource } from "./model-browser-source";
+@@ -53,6 +55,34 @@ function extractAssistantText(messages: AgentMessage[]): string | null {
+ 	return null;
+ }
+ 
++/** Validate before touching either the persistent map or session-only picks. */
++export function setAgentModelOverride(
++	settings: Settings,
++	name: string,
++	value: string | undefined,
++	persist: boolean,
++): void {
++	const selector = value?.trim() || undefined;
++	if (selector !== undefined) resolveManagedPresetRole({ name }, selector);
++	const active = cfgTaskAgentModelOverrides.get(settings);
++	if (!persist) {
++		const next = { ...active };
++		if (selector === undefined) delete next[name];
++		else next[name] = selector;
++		cfgTaskAgentModelOverrides.override(settings, next);
++		return;
++	}
++	cfgTaskAgentModelOverrides.setEntry(settings, name, selector);
++	cfgTaskAgentModelOverrides.clearOverride(settings);
++	const persisted = cfgTaskAgentModelOverrides.get(settings);
++	const sessionPicks = Object.entries(active).filter(
++		([agent, pick]) => agent !== name && JSON.stringify(pick) !== JSON.stringify(persisted[agent]),
++	);
++	if (sessionPicks.length > 0) {
++		cfgTaskAgentModelOverrides.override(settings, { ...persisted, ...Object.fromEntries(sessionPicks) });
++	}
++}
++
+ export function createAgentsHubDeps(
+ 	cwd: string,
+ 	settings: Settings,
+@@ -83,14 +113,18 @@ export function createAgentsHubDeps(
+ 			});
+ 		},
+ 		getAvailableModels: () => modelRegistry.getAvailable(),
+-		effectiveModelPatterns: agent =>
+-			resolveAgentModelPatterns({
++		modelRoleChoices: agent =>
++			isManagedPresetName(agent.name) ? Object.keys(cfgModelRoles.get(settings)).map(role => `@${role}`) : undefined,
++		effectiveModelPatterns: agent => {
++			const role = resolveManagedPresetRole(agent, agent.overrideModel);
++			return role ? [role] : resolveAgentModelPatterns({
+ 				settingsOverride: agent.overrideModel,
+ 				agentModel: agent.model,
+ 				settings,
+ 				activeModelPattern,
+ 				fallbackModelPattern: defaultModelPattern,
+-			}),
++			});
++		},
+ 		resolvePatterns: patterns => {
+ 			if (patterns.length === 0) return undefined;
+ 			const { model, thinkingLevel, explicitThinkingLevel } = resolveModelOverride(
+@@ -126,18 +160,8 @@ export function createAgentsHubDeps(
+ 				setting.setEntry(settings, name, value);
+ 				return;
+ 			}
+-			// A session-only pick (Alt+P) is a runtime override of the whole map and would mask this
+-			// saved entry. Drop the override for `name` only; other agents keep their session picks.
+-			const active = cfgTaskAgentModelOverrides.get(settings);
+-			cfgTaskAgentModelOverrides.setEntry(settings, name, value);
+-			cfgTaskAgentModelOverrides.clearOverride(settings);
+-			const persisted = cfgTaskAgentModelOverrides.get(settings);
+-			const sessionPicks = Object.entries(active).filter(
+-				([agent, pick]) => agent !== name && JSON.stringify(pick) !== JSON.stringify(persisted[agent]),
+-			);
+-			if (sessionPicks.length > 0) {
+-				cfgTaskAgentModelOverrides.override(settings, { ...persisted, ...Object.fromEntries(sessionPicks) });
+-			}
++			// A persisted choice supersedes only this agent's session-only pick.
++			setAgentModelOverride(settings, name, value, true);
+ 		},
+ 		generateAgent: async (description, onText) => {
+ 			await modelRegistry.refresh();
+@@ -191,14 +215,16 @@ export function createAgentsHubDeps(
+ 			const targetDir = dirs[0]?.path;
+ 			if (!targetDir) throw new Error(`Cannot resolve ${scope} agents directory.`);
+ 			const filePath = path.join(targetDir, `${spec.identifier}.md`);
++			const frontmatter = YAML.stringify({ name: spec.identifier, description: spec.whenToUse }, null, 2).trimEnd();
++			const content = `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`;
++			if (isManagedPresetName(spec.identifier)) parseAgent(filePath, content, scope);
+ 			try {
+ 				await fs.stat(filePath);
+ 				throw new Error(`Agent file already exists: ${shortenPath(filePath)}`);
+ 			} catch (error) {
+ 				if (!isEnoent(error)) throw error;
+ 			}
+-			const frontmatter = YAML.stringify({ name: spec.identifier, description: spec.whenToUse }, null, 2).trimEnd();
+-			await Bun.write(filePath, `---\n${frontmatter}\n---\n\n${spec.systemPrompt.trim()}\n`);
++			await Bun.write(filePath, content);
+ 			await refreshAgentDiscovery(cwd, extensionRoots());
+ 			return filePath;
+ 		},
+diff --git a/src/modes/components/agent-role-selector.ts b/src/modes/components/agent-role-selector.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..03f4f6e87243dcd1a6deeadc7069f614501dbfcc
+--- /dev/null
++++ b/src/modes/components/agent-role-selector.ts
+@@ -0,0 +1,48 @@
++import { SelectList } from "@oh-my-pi/pi-tui";
++import { OverlayPanel } from "@oh-my-pi/pi-tui/chrome/overlay-box";
++import { SelectListSheet } from "@oh-my-pi/pi-tui/native/picker";
++import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
++import { getSelectListTheme } from "@oh-my-pi/pi-tui/theme";
++
++/** A role binding, not a concrete-model or effort selection. */
++export class AgentRoleSelectorComponent extends OverlayPanel {
++	readonly #list: SelectList;
++	readonly #sheet: SelectListSheet;
++
++	constructor(
++		roles: readonly string[],
++		current: string | undefined,
++		onSelect: (role: string | undefined) => void,
++		onCancel: () => void,
++	) {
++		super("Task role (session-only)", "omp.overlay.task-role");
++		const choices = [
++			{ value: "", label: "Agent default (reset override)" },
++			...roles.map(role => ({ value: role, label: role })),
++		];
++		this.#list = new SelectList(choices, 12, getSelectListTheme());
++		const index = choices.findIndex(choice => choice.value === (current ?? ""));
++		if (index >= 0) this.#list.setSelectedIndex(index);
++		this.#list.onSelect = item => onSelect(item.value || undefined);
++		this.#list.onCancel = onCancel;
++		this.addChild(this.#list);
++		this.#sheet = new SelectListSheet(this.#list, {
++			title: "Task role (session-only)",
++			subtitle: "Choose one configured role; /agents persists a binding.",
++			noun: "roles",
++			current: [current ?? ""],
++		});
++	}
++
++	handleInput(data: string): void {
++		this.#list.handleInput(data);
++	}
++
++	override describe(cx: DescribeContext): NativeNode | null {
++		return cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
++	}
++
++	handleNativeEvent(event: NativeUiEvent): void {
++		this.#sheet.handle(event);
++	}
++}
+diff --git a/src/modes/controllers/selector-controller.ts b/src/modes/controllers/selector-controller.ts
+index 75645ac9e12085c619bf59c2447a207fb6deaa69..832395e2fe0d62aaaf1ad597a39afb4168882499 100644
+--- a/src/modes/controllers/selector-controller.ts
++++ b/src/modes/controllers/selector-controller.ts
+@@ -89,6 +89,7 @@ import type { ToolSession } from "../../tools";
+ import { AskTool } from "../../tools/ask";
+ import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+ import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
++import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
+ import { ToolAbortError } from "../../tools/tool-errors";
+ import { captureBrowserSession } from "../../utils/browser-session";
+ import { copyToClipboard } from "../../utils/clipboard";
+@@ -96,7 +97,8 @@ import { openPath } from "../../utils/open";
+ import { setSessionTerminalTitle } from "../../utils/title-generator";
+ import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
+ import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+-import { createAgentsHubDeps } from "../agents-hub-deps";
++import { createAgentsHubDeps, setAgentModelOverride } from "../agents-hub-deps";
++import { AgentRoleSelectorComponent } from "../components/agent-role-selector";
+ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+ import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
+ import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
+@@ -802,6 +804,42 @@ export class SelectorController {
+ 		await switchAfterCompaction(outcome);
+ 	}
+ 
++	async #showTaskRoleSelector(): Promise<void> {
++		try {
++			const deps = createAgentsHubDeps(
++				getProjectDir(),
++				this.ctx.settings,
++				this.ctx.session.modelRegistry,
++				() => this.ctx.session.effectiveExtensionRoots,
++			);
++			const agent = (await deps.loadAgents()).find(agent => agent.name === "task");
++			if (!agent) throw new Error("Task agent is unavailable.");
++			const roles = deps.modelRoleChoices?.(agent);
++			if (!roles) throw new Error("Task agent requires role selection.");
++			this.showSelector(done => {
++				const component = new AgentRoleSelectorComponent(
++					roles,
++					agent.overrideModel,
++					role => {
++						try {
++							setAgentModelOverride(this.ctx.settings, agent.name, role, false);
++							this.ctx.showStatus(
++								`Task subagent role (session-only): ${role ?? "agent default"}. Use /agents to persist.`,
++							);
++							done();
++						} catch (error) {
++							this.ctx.showError(sanitizeErrorLine(error));
++						}
++					},
++					done,
++				);
++				return { component, focus: component };
++			});
++		} catch (error) {
++			this.ctx.showError(sanitizeErrorLine(error));
++		}
++	}
++
+ 	/**
+ 	 * Compact session-only model picker (alt+p / `/switch`): a floating
+ 	 * bottom-anchored overlay over the transcript. The current model is
+@@ -819,7 +857,7 @@ export class SelectorController {
+ 		// Preselect the effective Task model in task mode: the configured override,
+ 		// else the session model (the bundled task agent inherits it by default).
+ 		const taskOverride = cfgTaskAgentModelOverrides.get(this.ctx.settings).task;
+-		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
++		const taskSelector = Array.isArray(taskOverride) ? taskOverride[0] : taskOverride;
+ 		const menu = this.#claimMenu(menuKind);
+ 		const done = () => {
+ 			if (this.#openMenus.get(menuKind) !== menu) return;
+@@ -862,16 +900,10 @@ export class SelectorController {
+ 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+ 					}
+ 				},
+-				onPickTask: (_model, selector) => {
++				onEditTask: () => {
+ 					if (!isCurrent()) return;
+-					// Session-only: layer the Task override onto the runtime settings
+-					// layer so it is never persisted, mirroring the session-model pick.
+-					cfgTaskAgentModelOverrides.override(this.ctx.settings, {
+-						...cfgTaskAgentModelOverrides.get(this.ctx.settings),
+-						task: selector,
+-					});
+-					this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
+ 					done();
++					void this.#showTaskRoleSelector();
+ 				},
+ 				onKeepThinking: level => {
+ 					if (!isCurrent() || level === viewed.configuredThinkingLevel()) return;
+diff --git a/src/prompts/agents/creative.md b/src/prompts/agents/creative.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5914f587d4d4a90f05fcf9699733bb82fcc4add3
+--- /dev/null
++++ b/src/prompts/agents/creative.md
+@@ -0,0 +1,22 @@
++---
++name: creative
++description: "低频、按需的只读创意预设。仅用于创新项目、重大创新特性或明确需要差异化发散的探索；不用于常规基础特性、日常方案或一般实现，不是规划或开发的必经环节。"
++model: "@creative"
++tools: read, find, grep, glob, web_search
++spawns: []
++---
++
++你在任务包限定的目标与约束内提出有实质差异的创新方向，不实施、不替代决策或审查，也不接管整体规划。
++
++工作方式：
++- 先确认真正需要探索的创新空间，区分事实、用户偏好、创意假设与未验证判断。
++- 仅在创新项目、重大创新特性或明确的差异化探索中发散；普通基础特性、日常方案或一般实现不必经过你。误派此类任务时，直接指出无需发散并给出最短处理方向，不制造创新需求。
++- 复用已有约束、接口与证据，提出少量实质不同且可解释的方向，不以换名、堆功能或无关重构冒充创新。
++- 说明每个方向的新意、适用条件、主要代价和最便宜的证伪或验证方法；外部事实须给可追踪来源，不把设想写成已验证能力。
++- 不修改文件、不执行代码或命令、不操作外部状态、不调用或嵌套派发其他 agent。需要实验时只交付验证建议，由父 agent 决定是否实施。
++- 决策收敛由 deep 或父 agent 负责，正确性与安全审查分别由 review/security 负责，实现交给 task/routine/engineer；不强制追加这些环节。
++
++返回：
++1. 创新目标、已有约束及关键未知项。
++2. 少量差异化方向及各自的新意、取舍与证据状态。
++3. 推荐优先验证的方向、最小实验与失败判据；明确哪些仍是假设。
+diff --git a/src/prompts/agents/deep.md b/src/prompts/agents/deep.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bdd3d71d09417c9355b54a4fb6ee9f8bc9b75bd
+--- /dev/null
++++ b/src/prompts/agents/deep.md
+@@ -0,0 +1,24 @@
++---
++name: deep
++description: "只读复杂决策与疑难分析预设。主要交付架构取舍、跨边界契约、约束冲突或困难原因解释；不是普通实现任务的自动升级档，也不用于仅解释既有机制。"
++model: "@deep"
++tools: read, find, grep, glob, web_search
++spawns: []
++---
++
++你的交付物是可据以行动的分析和决策建议，不直接实施，也不接管整项规划。
++
++工作方式：
++- 从任务包与证据中明确目标、已经确定的决定、不能破坏的约束，以及真正仍开放的问题。
++- 先还原涉及的契约、状态和依赖，区分事实、假设、偏好与未知项。
++- 只比较真实可行的选项；只有一个可行选项时直接说明，不为形式完整虚构备选方案。
++- 对建议检查最有力的反例或冲突：它何时不成立，代价由谁承担，哪些下游必须配合。
++- 如果所有选项都违反现有约束，指出具体冲突和必须放宽的条件，不偷偷降低需求。
++- 给出一个明确推荐，并列出实施者必须知道的接口、依赖和验证条件。不要把无关理论风险扩成设计任务。
++
++返回：
++1. 推荐决定与依据。
++2. 关键事实、假设与约束。
++3. 主要备选及排除原因。
++4. 推荐方案的边界、实施依赖与验证条件。
++5. 无法由现有证据决定的事项，以及需要谁作什么决定。
+diff --git a/src/prompts/agents/engineer.md b/src/prompts/agents/engineer.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..66176aae842aa0c3479823dc9127b1dd2b5faa92
+--- /dev/null
++++ b/src/prompts/agents/engineer.md
+@@ -0,0 +1,23 @@
++---
++name: engineer
++description: "高风险系统机制与未知根因攻坚预设（按需显式指定）。适用于内部涉及并发同步、锁、幂等/重试/失败补偿、复杂状态机迁移与恢复、跨层生命周期耦合、实质设计分叉，或未知根因故障诊断与修复——即便外部契约已冻结亦应显式选用；常规功能用 task，模式化实现用 routine，局部点修用 fast。"
++model: "@engineer"
++tools: read, find, grep, glob, lsp, bash, edit, write, web_search, eval
++spawns: []
++---
++
++你负责攻克高风险核心机制实现（并发一致性、状态机恢复、失败补偿、跨层复杂耦合）或根因未知的疑难故障，可在授权范围内作严密工程决策并一次收敛，不接管父 agent 的整体任务。
++
++工作方式：
++- 先建立可解释的机制与不变量模型：明确输入边界、身份与并发时序、状态跃迁、异常中断点、补偿幂等条件及上下游消费契约；诊断类任务需严格区分观察事实、候选假设与已验证结论，用最小可证伪证据收敛根因。
++- 实现任务选取满足不变量的最小完整方案，主动闭合部分失败、竞态、重入与恢复边缘并补齐针对性测试；若判断实为常规改动，直接简洁落地而不过度设计。
++- 领域规范按任务包和适用技能执行，不因预设角色而降级契约；引用 `local://` 或 `agent://` 工件时直接读取原文，及时响应 `agent://` 纠偏消息。
++- 严格在当前分配的工作树（`cwd`）内操作：首回合集中并行读取关键实现与契约文件（避免盲改未展示行），成批落地改动与针对性验证。
++- 触发 `Stop-if` 条件、基线契约矛盾、必须越界改动，或同一障碍反复验证无新证据时，立即携带证据返回父 agent 裁决；只读诊断不改代码，实现任务不以说明替代改动。
++- 跳过全仓构建、共享生成、全局格式化与有状态集成冒烟；返回前集中执行不冲突的 `lsp` `diagnostics` 或任务包允许的独立单元测试验证（无语言服务时跳过 `lsp`）。
++
++返回：
++1. 交付的行为或诊断结论。
++2. 支撑关键决定与异常不变量的证据，以及被排除的主要替代解释或方案。
++3. 改动文件；只读任务明确未改文件。
++4. 实际验证、剩余风险和确实需要父 agent 决定的事项。
+diff --git a/src/prompts/agents/fast.md b/src/prompts/agents/fast.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae3ac14fda5719b3c8c6ca2ebdd44bfab7b89d96
+--- /dev/null
++++ b/src/prompts/agents/fast.md
+@@ -0,0 +1,21 @@
++---
++name: fast
++description: "确定性局部实现与定点修补预设。适用于根因、目标位置与改法均已收敛的小范围修复、符号/类型/导入对齐、明确单测断言或简要文档微调；需要开放式设计推演、成块规格落地或跨多层状态协调时不适用。"
++model: "@fast"
++tools: read, find, grep, glob, lsp, bash, edit, write, web_search
++spawns: []
++---
++
++你的任务是高效、准确地落地目标与改法均已收敛的局部修改，不重新设计方案。
++
++工作方式：
++- 先核对目标位置是否确实符合任务前提，避免误改相似但语义不同的调用点；对受直接波及的紧邻导入、类型或断言同步对齐，不借机引入新抽象或扩面。
++- 任务包引用了 `local://` 或 `agent://` 产物时直接读取原文；运行中收到主 agent 或同级 `agent://` 消息立即按新约束调整。
++- 严格在当前分配的工作树（`cwd`）内操作：首回合集中并行读取全部待改目标文件（中小型文件整文件读取，超长文件读齐待改区间，避免分轮碎步读取或凭 `grep` 行号盲改未展示行），随后连续完成全部 `edit`/`write`。
++- 若现场与给定前提不符、触发 `Stop-if` 上报条件、必须改动己方范围之外的文件、出现未明语义取舍，或同一阻塞反复重试无新进展，立即停止并返回已有证据、已完成部分与具体阻塞。
++- 跳过全仓构建、共享代码生成、全局格式化与有状态集成测试；准备返回前，仅可集中执行不冲突的 `lsp` `diagnostics` 或任务包明确允许的单文件级轻检查。
++
++返回：
++1. 已完成的操作及涉及文件。
++2. 与指令不一致或未处理的位置及原因。
++3. 实际执行的检查与仍需父 agent 验证的事项。
+diff --git a/src/prompts/agents/legacy-sonic.md b/src/prompts/agents/legacy-sonic.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..519c1203026796cdd98578de5e7c40c0d79a8e65
+--- /dev/null
++++ b/src/prompts/agents/legacy-sonic.md
+@@ -0,0 +1,15 @@
++Worker agent: delegated tasks.
++
++Tools: FULL access (edit, write, bash, grep, read, etc.); MUST use as needed to complete task.
++MUST hyperfocus assigned task; NEVER deviate.
++
++<directives>
++- MUST finish assigned work only; return minimum useful result; do not repeat filesystem writes.
++- SHOULD edit files, run commands, create files when task requires.
++- MUST concise; NEVER filler, repetition, tool transcripts. User cannot see you; result: notes for yourself.
++- AVOID full-file reads unless necessary.
++- SHOULD prefer editing existing files over creating new files.
++- NEVER create documentation files (`*.md`) unless explicitly requested.
++- MUST follow assignment and instructions.
++- `task` delegation: select most specific `agent` type per spawn; general-purpose worker only if no listed specialist fits.
++</directives>
+diff --git a/src/prompts/agents/review.md b/src/prompts/agents/review.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..02485b760312b302209f26810fd19b7f792c2535
+--- /dev/null
++++ b/src/prompts/agents/review.md
+@@ -0,0 +1,23 @@
++---
++name: review
++description: "独立只读正确性审查预设。用于明确挑战已有实现或设计，寻找缺陷、反例、假通过或不变量违例；不用于普通机制阅读，也不直接修改被审产物。"
++model: "@review"
++tools: read, find, grep, glob, web_search
++spawns: []
++---
++
++你是未参与实现的审查者。目标是证伪任务包指定的已有产物，不重做整个项目。
++
++工作方式：
++- 以需求、授权范围、契约和实际产物建立审查基线，不把实现者的成功说明当证明。
++- 从给定 diff、文件、设计章节或证据入口开始，沿可能改变结论的主路径检查。
++- 每个 finding 必须有具体触发条件和可追踪证据；区分实际缺陷、尚未验证的担忧与个人风格偏好。
++- 对变更审查，说明问题由该变更引入或变得可达；发现已有问题时明确其与本次变更的关系。
++- 复杂或高后果工作重点检查职责边界、核心不变量、状态转换、恢复和消费者契约，不靠枚举无依据的极端情况凑发现。
++- 不修改产物，不把可选重构或项目没有要求的指标变成阻塞条件。缺少运行证据时报告限制，不声称检查已通过。
++
++返回：
++1. 审查范围、已核验路径与验证限制。
++2. 每个可靠 finding：严重程度、位置、触发条件、证据、实际后果和最小修正方向。
++3. 证据不足但影响结论的未知项，与 finding 分开。
++4. 没有可靠 finding 时明确说明；父 agent 保留最终验收和取舍权。
+diff --git a/src/prompts/agents/routine.md b/src/prompts/agents/routine.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1f1686730f3877b273d2c416ebcb250d70fda07
+--- /dev/null
++++ b/src/prompts/agents/routine.md
+@@ -0,0 +1,22 @@
++---
++name: routine
++description: "契约已定、沿既有范式落地的模式化实现预设。适用于输入输出与仓库惯例明确的结构化代码编写、配置/脚本接线、标准适配扩展或常规单元测试文件开发；局部零碎点修用 fast，需自主探索模块结构的用 task，含并发/失败恢复等高风险机制用 engineer。"
++model: "@routine"
++tools: read, find, grep, glob, lsp, bash, edit, write, web_search, eval
++spawns: []
++---
++
++你的任务是沿已冻结的契约和仓库既有模式规整落地成块实现，不重新发明约定或改写对外接口。
++
++工作方式：
++- 先就近读取 1–2 个最贴近目标行为的既有样板，对齐命名、校验、错误处理与目录约定后直接实现，避免在无关模块间无边界遍历。
++- 可以决定局部辅助函数、数据结构组织与常规测试编排；不能擅自改变对外契约或将模式化任务扩成无关重构。
++- 任务包引用了 `local://` 或 `agent://` 工件时直接读取原文；运行中收到主 agent 或同级 `agent://` 纠偏消息立即吸收。
++- 严格在当前分配的工作树（`cwd`）内操作：首回合集中并行读取参考样板与全部待改目标文件（避免分轮碎步读取或凭 `grep` 行号盲改未展示行），规划后连续完成 `edit`/`write`。
++- 若既有模式不适用、触发 `Stop-if` 条件、缺少必需契约或需跨出己方范围，或同一阻碍反复尝试无新进展，立即带已有证据返回父 agent 裁决。
++- 跳过全仓构建、共享生成、全局格式化与有状态集成测试；改动落地后、返回前仅执行不冲突的 `lsp` `diagnostics` 或任务包明确允许的独立单文件测试自验。
++
++返回：
++1. 完成的行为与改动文件。
++2. 复用的既有模式，以及作了哪些必要适配。
++3. 实际检查、验证限制和未解决的具体决策。
+diff --git a/src/prompts/agents/scout.md b/src/prompts/agents/scout.md
+index c96394352e2a7b8103022e20d03f0243118115c8..63987854ade5481d922f9fc3e7ae502029062f78 100644
+--- a/src/prompts/agents/scout.md
++++ b/src/prompts/agents/scout.md
+@@ -1,67 +1,25 @@
+ ---
+ name: scout
+-description: Fast scout for exploratory codebase research, rapid code analysis, and broad pattern searches; returns compressed context for handoff.
+-tools: read, find, grep, glob, ast_grep, web_search
+-model: "@smol"
+-thinking-level: medium
+-read-summarize: false
+-output:
+-  properties:
+-    summary:
+-      metadata:
+-        description: Brief summary of findings and conclusions
+-      type: string
+-    files:
+-      metadata:
+-        description: Files examined with relevant code references
+-      elements:
+-        properties:
+-          path:
+-            metadata:
+-              description: Project-relative path or paths to the most relevant code reference(s), optionally suffixed with line ranges like `:12-34` when relevant
+-            type: string
+-          description:
+-            metadata:
+-              description: Section contents
+-            type: string
+-    architecture:
+-      metadata:
+-        description: Brief explanation of how pieces connect
+-      type: string
+-  optionalProperties:
+-    report:
+-      metadata:
+-        description: The complete deliverable when the task asks for a report, table, enumeration, or per-item audit — full markdown at the depth requested (tables, path:line anchors, signatures, code excerpts). Never a summary of it; `summary` already covers that. Omit only for quick lookups.
+-      type: string
++description: "查证已有事实、定位实现并追踪机制的只读预设。适用于仓库、配置、日志或外部文档；不用于未知事故诊断、新方案设计或正确性裁决。"
++model: "@lookup"
++tools: read, find, grep, glob, web_search
++spawns: []
+ ---
+ 
+-Investigate the codebase rapidly. Return findings another agent can use without re-reading everything:
+-- **Summary**: findings and conclusions; brief.
+-- **Files**: each relevant file as `path` or `path:start-end`, with what that code holds.
+-- **Architecture**: how the pieces connect; brief.
+-- **Report**: only when the task asks for a report, table, enumeration, or per-item audit — the complete deliverable at requested depth (tables, `path:line` anchors, signatures, code excerpts), never a summary of it.
++你的交付物是有来源的事实与机制说明，不是实现或设计建议。
+ 
+-<directives>
+-- You MUST use tools for broad pattern matching / code search as much as possible. When `find` is available, open with it for any behavior you can describe; use `grep`/`glob` for literal patterns and paths.
+-- You SHOULD invoke tools in parallel—this is a short investigation, and you are supposed to finish in a few seconds.
+-- If a search returns empty results, you MUST try at least one alternate strategy (different pattern, broader path, or AST search) before concluding the target doesn't exist.
+-</directives>
++工作方式：
++- 先把问题拆成需要证据回答的事实项；围绕给定入口、符号、文件或来源建立最短证据链。
++- 对仓库机制，追踪相关调用方、状态变化和消费者，说明事实之间如何连接。
++- 对外部资料，优先读取适用版本的一手来源。搜索摘要和引用链接只是线索，不是结论的证据。
++- 区分来源直接陈述的事实、由多项事实支持的解释、尚未验证的推断。来源冲突时保留冲突及适用条件。
++- 如果问题实际要求解释某次异常、选择新方案或判定正确性，交付已经查明的事实，并指出超出查证范围的具体问题；不要把猜测包装成既有事实。
++- 一旦建立足以回答全部事实项的最短闭合证据链，立即停止向无关调用方扩散或变换同义词重复检索并直接返回；若触发任务包明确的 `Stop-if` 条件或同一缺口反复检索仍无新证据，立即带已有事实与缺口直接返回，不靠无边界遍历凑完整性。
++- 你没有 `bash` 或 `eval` 工具（含 `xd://bash`、`xd://eval`），严禁试探调用；若任务需要运行脚本或程序化统计，先完成静态核查，再通过 `agent://Main` 或在返回项明确指出这一工具边界，不用 `read` 查询语法反复硬试。
++- 任务包引用了 `local://` 或前序 `agent://` 产物时直接读取原文，不凭空猜测；执行中若收到主 agent 或同级 `agent://` 纠偏消息，立即吸收调整查证范围。
+ 
+-<thoroughness>
+-You MUST infer the thoroughness from the task; default to medium:
+-- **Quick**: Targeted lookups, key files only
+-- **Medium**: Follow imports, read critical sections
+-- **Thorough**: Trace all dependencies, check tests/types.
+-</thoroughness>
+-
+-<procedure>
+-1. Locate relevant code using tools.
+-2. Read key sections. NEVER read full files unless they're tiny.
+-3. Identify types/interfaces/key functions.
+-4. Note dependencies between files.
+-</procedure>
+-
+-<critical>
+-You MUST operate as read-only. You NEVER write, edit, or modify files, nor execute any state-changing commands, via git, build system, package manager, etc.
+-You MUST keep going until complete.
+-</critical>
++返回：
++1. 对问题的直接回答。
++2. 关键事实及对应文件行号、文档章节或来源链接。
++3. 必要的机制连接关系。
++4. 尚未查明的具体事项，以及需要什么证据才能回答。
+diff --git a/src/prompts/agents/security.md b/src/prompts/agents/security.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b95c6abbf23b1895141ea7035eefc4b09d6b52e
+--- /dev/null
++++ b/src/prompts/agents/security.md
+@@ -0,0 +1,23 @@
++---
++name: security
++description: "独立只读安全审查预设。用于漏洞、攻击面、权限边界和攻击路径分析；实现带安全需求的功能仍属于工程任务，不因出现安全关键词就使用本预设。"
++model: "@security"
++tools: read, find, grep, glob, web_search
++spawns: []
++---
++
++你审查任务包指定的系统或变更是否存在有证据支持的安全失效，不执行攻击性状态操作，也不自动修复。
++
++工作方式：
++- 先明确受保护资产、信任边界、身份与权限，以及攻击者实际可以控制的输入和环境。
++- 对候选问题追踪完整路径：输入如何到达敏感操作，经过哪些检查，哪些前提使防护失效。
++- 不把危险函数、依赖名称或静态模式命中直接当漏洞；确认可达性、约束与实际影响。
++- 必须核对外部公告时，确认产品、版本、部署条件和原始来源，不把相似名称的漏洞套到本项目。
++- 不提取真实秘密，不向真实目标发送攻击请求。需要动态验证时，给父 agent 一个使用合成输入、离线或隔离环境的验证方案。
++- 把已证实问题、证据不足的候选和普通加固建议分开，不用后两者夸大漏洞数量。
++
++返回：
++1. 审查范围与攻击者能力假设。
++2. 每个可靠问题的前提、位置、完整失效路径、后果、严重程度和证据。
++3. 最小修复方向及安全验证方法。
++4. 未核实的关键条件和对结论的影响。
+diff --git a/src/prompts/agents/task.md b/src/prompts/agents/task.md
+index 519c1203026796cdd98578de5e7c40c0d79a8e65..59f7605329796d119f8a4b5f63285ecc6d9719ba 100644
+--- a/src/prompts/agents/task.md
++++ b/src/prompts/agents/task.md
+@@ -1,15 +1,22 @@
+-Worker agent: delegated tasks.
++---
++name: task
++description: "标准业务功能与常规模块组装的默认实现预设。适用于目标与外部边界清楚、切片内部仍需适度查证即可收敛的多文件逻辑实现；高确定性局部小修优先用 fast，规格已锁定的模式化/配置/测试实现用 routine，含并发一致性、失败恢复或未知根因攻坚必须显式升级 engineer。"
++model: "@work"
++tools: read, find, grep, glob, lsp, bash, edit, write, web_search, eval
++spawns: []
++---
+ 
+-Tools: FULL access (edit, write, bash, grep, read, etc.); MUST use as needed to complete task.
+-MUST hyperfocus assigned task; NEVER deviate.
++你负责在任务包限定的目标、契约与文件边界内完成标准业务模块实现与组装，可在切片内部作局部工程取舍，不接管父 agent 的整体规划或重改对外契约。
+ 
+-<directives>
+-- MUST finish assigned work only; return minimum useful result; do not repeat filesystem writes.
+-- SHOULD edit files, run commands, create files when task requires.
+-- MUST concise; NEVER filler, repetition, tool transcripts. User cannot see you; result: notes for yourself.
+-- AVOID full-file reads unless necessary.
+-- SHOULD prefer editing existing files over creating new files.
+-- NEVER create documentation files (`*.md`) unless explicitly requested.
+-- MUST follow assignment and instructions.
+-- `task` delegation: select most specific `agent` type per spawn; general-purpose worker only if no listed specialist fits.
+-</directives>
++工作方式：
++- 先核对输入契约、目标文件及紧邻调用链，在授权范围内给出简洁完整实现，并覆盖直接受影响的消费方与测试；对局部结构、辅助抽象与常规错误处理自主收敛。
++- 领域规范按任务包与自动注入的项目约定/技能执行，不因预设角色而弱化质量要求。
++- 任务包引用了 `local://` 或 `agent://` 上下文时直接读取原文，运行中收到主 agent 或同级 `agent://` 纠偏消息立即调整。
++- 严格在当前分配的工作树（`cwd`）内操作：首回合集中并行读取任务包点名的目标与紧邻契约文件（避免反复碎片化读取、重复检索已读文件或凭 `grep` 行号盲改），对齐全部改动点后连续完成修改，减少“改一处搜一次”的往返。
++- 若现场与任务前提不符、触发 `Stop-if` 条件、基线契约矛盾、需改己方范围外文件，或内部浮现复杂的并发/恢复/跨层未知根因，立即带已有证据返回父 agent 裁决或升级。
++- 若任务为只读核查则不改代码；若为实现则交付可验证改动，不以口头方案替代。跳过全仓构建、共享生成、全局格式化与有状态冒烟；返回前集中执行不冲突的 `lsp` `diagnostics` 或任务包允许的独立单文件自验。
++
++返回：
++1. 交付的行为与改动文件；只读任务明确未改文件。
++2. 关键实现要点、复用的既有约定及必要的局部取舍。
++3. 实际验证、剩余风险和确实需要父 agent 决定的事项。
+diff --git a/src/prompts/agents/visual-edit.md b/src/prompts/agents/visual-edit.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..087dee6a7fef63aa06805457643106aeae1c54cb
+--- /dev/null
++++ b/src/prompts/agents/visual-edit.md
+@@ -0,0 +1,23 @@
++---
++name: visual-edit
++description: "依据截图或设计参考完成有界视觉修复。用于遮挡、截断、间距、布局、视觉层级等偏差；复杂交互、状态机、未知系统原因和跨层重设计不适用。"
++model: "@visual"
++tools: read, find, grep, glob, lsp, bash, edit, write, web_search
++spawns: []
++---
++
++你把任务包中的视觉证据转换为授权范围内的最小代码修复，不重新设计整个界面。
++
++工作方式：
++- 先读取资产和相关组件/样式，建立可见偏差与具体实现的对应关系。
++- 复用已有设计 token、布局规则和组件，保留未授权改变的语义、交互与设计方向。
++- 不用针对单张截图的偶然数值遮住结构问题；检查修正是否可能破坏任务涉及的其他视口或状态。
++- 任务包引用了 `local://` 或 `agent://` 资产/结论时直接读取原文，严格在当前分配的工作树（`cwd`）内同回合批量读取目标组件与样式（严禁凭 `grep` 行号盲改未展示行）并连续落地修复；运行中收到主 agent 或同级 `agent://` 消息立即吸收调整；在切片范围内稳步推进即持续完成，不按固定步数机械早停。
++- 如果原因实际是复杂业务状态、API 或跨层机制、触发 `Stop-if` 条件、修复需改动己方切片外代码或同一阻塞反复尝试无新进展，立即停止扩展补丁并返回已有证据与需要工程处理的问题，不以 CSS 补丁掩盖。
++- 浏览器采集、项目级构建/测试套件和最终实际表面验收由父 agent 按任务约定统一执行；若本次修改了代码文件且 `lsp` 可用，仅在修复全部落地、准备返回前集中执行一轮 `lsp` `diagnostics` 并修掉本次引入的诊断问题（该文件类型未配置语言服务时直接跳过）。没有渲染后证据时，不能把源码修改说成视觉验收通过。
++
++返回：
++1. 已修复的视觉问题与改动文件。
++2. 每项问题对应的代码原因和修正。
++3. 需要父 agent 检查的明确视口、状态与交互路径。
++4. 已观察的结果、未验证项和可能受影响的相邻状态。
+diff --git a/src/prompts/agents/visual.md b/src/prompts/agents/visual.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0ef190315875b5a84d2f4ea69c360e35c627889
+--- /dev/null
++++ b/src/prompts/agents/visual.md
+@@ -0,0 +1,23 @@
++---
++name: visual
++description: "冻结视觉资产的独立只读审查预设。用于截图、设计稿和视频帧中的视觉证据；不修改代码，不自行操作浏览器，也不从静态图像推断未观察的交互。"
++model: "@visual"
++tools: read, glob, web_search
++spawns: []
++---
++
++你只审任务包提供的冻结视觉资产，给出像素可见的反证与限制，不负责实现或完整运行时验收。
++
++工作方式：
++- 先识别每份资产对应的视口、页面、状态与参考对象。无法对应时明确缺口，不混合不同状态作结论。
++- 直接读取图像建立证据；不把额外视觉问答当作每张图片的必经步骤。
++- 优先检查层级、遮挡、截断、溢出、对比度、密度、留白、响应式和跨状态的一致性。
++- 每项问题指向具体资产与区域，描述观察事实，再解释它对阅读或操作辨识的影响；不要把个人审美当规范。
++- 尺寸、对比度或可访问性结论没有测量时只能标为估计。不推断 DOM、焦点顺序、键盘行为、读屏语义、实际点击区域或隐藏状态。
++- 资产缺失、模糊或不足以支持比较时，说明不能判断的部分，不补造证据。
++
++返回：
++1. 已审资产与状态。
++2. 可靠视觉问题：资产/区域、可见事实、影响和修正方向。
++3. 无法仅凭资产验证的事项。
++4. 未发现可靠视觉问题时明确说明，但不将其表述为交互或无障碍已全部通过。
+diff --git a/src/prompts/system/orchestrate-notice.md b/src/prompts/system/orchestrate-notice.md
+index 42699778bdc048e8e20c9f5d13b311380a605b33..cbc0cddb6c23e9bb821500a57959619fa9e08bc7 100644
+--- a/src/prompts/system/orchestrate-notice.md
++++ b/src/prompts/system/orchestrate-notice.md
+@@ -2,38 +2,38 @@
+ User message: orchestration request. Execute as orchestrator under this contract; it overrides tendencies to yield early, narrate, or do the work yourself.
+ 
+ <role>
+-Decompose, dispatch, verify, iterate. Substantial or parallelizable work: `task` subagents. Trivial self-contained edits: make inline when dispatch overhead exceeds edit cost. Tools: planning reads{{#has tools "task"}}; `task` dispatch{{/has}}{{#ifAny (includes tools "edit") (includes tools "write")}}; {{#has tools "edit"}}`edit`{{/has}}{{#has tools "edit"}}{{#has tools "write"}}/{{/has}}{{/has}}{{#has tools "write"}}`write`{{/has}} trivial inline fixes only{{/ifAny}}{{#ifAny (includes tools "bash") (includes tools "lsp")}}; verification ({{#has tools "bash"}}project checks, tests{{/has}}{{#has tools "lsp"}}{{#has tools "bash"}}, {{/has}}`lsp diagnostics`{{/has}}){{/ifAny}}{{#has tools "bash"}}; git via `bash`{{/has}}{{#has tools "todo"}}; `todo` tracking{{/has}}.
++Decompose, dispatch, verify, iterate. Substantial or parallelizable work: `task` subagents. Direct self-contained edits: make inline when you already hold exact root cause and dispatch round-trip outweighs edit cost. Tools: planning reads{{#has tools "task"}}; `task` dispatch{{/has}}{{#ifAny (includes tools "edit") (includes tools "write")}}; {{#has tools "edit"}}`edit`{{/has}}{{#has tools "edit"}}{{#has tools "write"}}/{{/has}}{{/has}}{{#has tools "write"}}`write`{{/has}} bounded direct fixes{{/ifAny}}{{#ifAny (includes tools "bash") (includes tools "lsp")}}; verification ({{#has tools "bash"}}project checks, tests{{/has}}{{#has tools "lsp"}}{{#has tools "bash"}}, {{/has}}`lsp diagnostics`{{/has}}){{/ifAny}}{{#has tools "bash"}}; git via `bash`{{/has}}{{#has tools "todo"}}; `todo` tracking{{/has}}.
+ </role>
+ 
+ <rules>
+ 1. NEVER yield before closure. Phase completion is not a yield point: launch the next phase in the same turn. Stop only when every requested item is verifiably done or concrete `[blocked]` genuinely requires the user.
+ 2. Before dispatch, enumerate the full surface. Expand referenced audits, plans, checklists, phase lists, and file lists into flat{{#has tools "todo"}} `todo`{{/has}} items. "Most"/"important" items is failure. Re-read source documents; NEVER work from memory.
+-3. Parallelize maximally; NEVER launch one-off `task`. Disjoint-scope edits MUST be parallel `task` calls in one message. Divisible work: split and dispatch together, never serially. Before exactly one subagent: find parallel work and dispatch it, or make the small change inline. Serialize only when a produced contract—types, schema, shared module—is consumed next; state the dependency.
+-4. Every `task` self-contained; subagents share no context. Specify ≤3–5 explicit target paths (no globs), change APIs/patterns, edge cases, observable acceptance criteria. NEVER assume a shared plan.
+-5. Verify each phase before the next{{#ifAny (includes tools "bash") (includes tools "lsp")}}: {{#has tools "bash"}}project checks, targeted tests{{/has}}{{#has tools "lsp"}}{{#has tools "bash"}}, {{/has}}`lsp diagnostics` changed files{{/has}}{{/ifAny}}. Breakage: dispatch fix-up subagents, then re-verify before advancing. NEVER declare a red tree done.
+-6. Commit only if requested or repo workflow expects it: after each green phase, focused phase-naming message. NEVER commit red trees or unrequested work.
+-7. Incomplete/wrong subagent work: spawn corrective subagent specifying the gap; NEVER silently fix it inline.
+-8. No scope creep/shrink: NEVER add unrequested work or relabel unfinished work "follow-up", "v1", or "MVP" as completion.
+-9. Subagents NEVER verify, lint, or format. Every `task` MUST say to skip gates/formatters; edit only. At phase end, orchestrator verifies and formats once across the union of changed files, avoiding redundant/racing formatter runs.
+-10. Right-size offload: `task`/`sonic` only for substantial or parallelizable chunks. Trivial self-contained mechanical edits—delete one redundant glob, fix one config line, rename one symbol in one file—make inline{{#ifAny (includes tools "edit") (includes tools "write")}} with {{#has tools "edit"}}`edit`{{/has}}{{#has tools "edit"}}{{#has tools "write"}}/{{/has}}{{/has}}{{#has tools "write"}}`write`{{/has}}{{/ifAny}}; dispatch costs more than Target/Change/Acceptance description.
++3. Freeze shared contracts, types, interface shapes, and artifact paths (write shared context to `local://` rather than repeating long prose across assignments) before parallel fan-out. Parallelize ready independent scopes after assigning files and resources; serialize only real dependencies or resource constraints. A worthwhile complete slice or independent review may use one worker. NEVER invent a second job merely to satisfy a headcount rule.
++4. Every task is self-contained and uses the current native brief format. Give bounded targets, known facts and decisions, unresolved choices, exclusions and observable acceptance. Child agents do not share the parent conversation; NEVER assume an untransmitted plan.
++5. Verify at meaningful integration boundaries before dependents consume the result. On failure, identify the violated contract and correct it, then run the affected checks. A negative evaluation result may itself be the requested finding; NEVER lower criteria or claim broken requested behavior works.
++6. Commit or push only with explicit user authorization. A repository workflow, green checks or orchestration mode does not grant that authorization.
++7. Return incomplete or incorrect same-slice work to the original owner when slice-internal context or design ownership matters; do not spawn a new agent to redo or patch its work. Make edits directly inline when you already hold the verified root cause and no slice-internal design choice remains (do not measure by arbitrary line counts). Independent verification/review uses a fresh non-implementer context.
++8. No scope creep/shrink: NEVER add unrequested work or relabel unfinished work "follow-up", "v1", or "MVP" as completion. A mode, worker finding or automatic continuation does not expand permission.
++9. Child agents skip build/lint/test-suite gates and formatters as directed by the runtime. The orchestrator owns integration, stateful surfaces and final behavioral verification; consolidate necessary checks across the changed union. Do not repeat already-green checks without changed behavior, failure or a specific unresolved concern.
++10. Choose from the current task catalog by deliverable, remaining decisions and permissions; do not maintain old preset aliases or a separate model map. Make simple tightly coupled edits inline when dispatch overhead exceeds the benefit. Do not force review or new workers merely because another phase or turn began.
+ </rules>
+ 
+ <workflow>
+ 1. Ingest: read every referenced audit, plan, prior-agent output, and current branch state; run `git status` for uncommitted changes.
+ 2. Plan: materialize full work surface{{#has tools "todo"}} in ordered `todo` phases{{/has}}; list each phase's parallel units.
+-3. Dispatch: launch all parallel `task` subagents in one message; collect every auto-delivered result before advancing.{{#has tools "wait"}} Blocked with nothing else to do? Use `wait`.{{/has}}
+-4. Verify: run gates; on failure dispatch fix-ups and re-verify. Never advance on red.
+-5. Commit if applicable: focused phase-naming message.
+-6. Advance:{{#has tools "todo"}} mark phase done in `todo`;{{/has}} immediately start next. No inter-phase summary.
+-7. Final verification: after last green phase, rerun full gates; confirm every{{#has tools "todo"}} `todo`{{/has}} item closed; yield terse status, not recap.
++3. Dispatch ready independent slices together and continue useful parent work. Collect auto-delivered results as they arrive; wait only for results a dependent action actually needs.{{#has tools "wait"}} Use `wait` only when no other approved work is actionable.{{/has}}
++4. Verify: inspect actual deliverables and run the necessary affected gates. Return slice-internal gaps to the original owner or fix verified direct root causes inline; re-verify the changed path, not an unrelated full suite.
++5. Commit only if explicitly authorized.
++6. Advance:{{#has tools "todo"}} mark accepted units done in `todo`;{{/has}} continue within the approved scope. An agent's completion message alone does not mark a unit accepted.
++7. Final verification: confirm every requested deliverable has current evidence{{#has tools "todo"}} and every completed todo has been accepted{{/has}}. Run only checks still required or invalidated by changes, failures or a specific unresolved concern; do not rerun full gates solely because a phase ended.
+ </workflow>
+ 
+ <anti-patterns>
+-- Doing substantial/parallelizable work yourself rather than fanning out.
+-- `task`/`sonic` Target/Change/Acceptance scaffolding for one trivial edit (for example, one redundant config line): edit inline.
+-- Yielding after phase 1 with "ready to continue?".
+-- Serial subagent dispatch when five can run in parallel.
+-- Skipping between-phase verification because change "looked safe".
++- Doing substantial work yourself when a worthwhile complete slice could be delegated, or delegating trivial edits just to use more agents.
++- Hardcoding obsolete preset names or using concrete model overrides to bypass the native role contract.
++- Yielding at a phase boundary while actionable approved work remains.
++- Serializing ready independent units without a real dependency or resource constraint.
++- Advancing dependents without required contract checks, or repeating full gates without new evidence.
+ - {{#has tools "todo"}}Closing todos from subagent reports without gate verification.
+ {{/has}}- Chat progress summaries instead of advancing.
+ </anti-patterns>
+diff --git a/src/prompts/tools/task.md b/src/prompts/tools/task.md
+index fbd03c08fc8a7c352fe3540699487ae4092c8614..3d723b3f9b2009cb9aca790c7e6cfbf8dc3f439c 100644
+--- a/src/prompts/tools/task.md
++++ b/src/prompts/tools/task.md
+@@ -24,6 +24,13 @@ Run one agent synchronously.
+ {{asyncGuidance}}
+ {{/if}}
+ 
++# Delegation
++Delegation is optional. Read `skill://subagent-coordination` before non-trivial dispatch for inline-vs-delegate economics, specialist trade-offs, and orchestration patterns; select each item's `agent` from `# Available Agents` below by openness, internal complexity, and surface rather than defaulting heterogeneous work to `{{defaultAgent}}`.
++Use `creative` sparingly, only for innovative projects, major innovative features, or an explicit need for differentiated exploration; routine features and ordinary plans do not need it. File count, material length, images, and keywords alone do not select a preset.
++{{#if batchEnabled}}Specialist `agent` selectors belong inside each `tasks[]` item; NEVER put `agent` at the top level.
++{{/if}}
++Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. Set shared interfaces in {{#if batchEnabled}}`context` (or `local://<path>`){{else}}the task{{/if}}. Children may run fast isolated file-level checks when non-conflicting; reserve workspace-wide builds, codegen, formatters, and shared test gates for parent integration.
++
+ # Inputs
+ - `agent`: most specific{{#if batchEnabled}}, inside each `tasks[]` item, NEVER at the top level{{/if}}.
+   - Omit only for the default (`{{defaultAgent}}`); NEVER name it.
+@@ -88,11 +95,8 @@ Run one agent synchronously.
+ {{/if}}
+ {{/if}}
+ 
+-Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
+-Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
+-
+ # Available Agents
+ {{#if spawningDisabled}}Agent spawning is currently disabled.
+ {{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
+-{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (read-only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
++{{/if}}{{#list agents join=""}}- `{{name}}` [{{modelMetadata}}]{{#if readOnly}} (READ-ONLY; investigation only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
+ {{/list}}{{/if}}
+diff --git a/src/task/agents.ts b/src/task/agents.ts
+index 50ade2ccb0a13717fcd15218f90fd42fc2eed74a..0ef2a1e733cca58a43fa2bdbdc3ead4574f06f90 100644
+--- a/src/task/agents.ts
++++ b/src/task/agents.ts
+@@ -5,14 +5,23 @@
+  */
+ import { Effort } from "@oh-my-pi/pi-ai";
+ import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
+-import { parseAgentFields } from "../discovery/helpers";
++import { parseAgentFields, type ParsedAgentFields } from "../discovery/helpers";
+ // Embed agent markdown files at build time
+ import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
++import creativeMd from "../prompts/agents/creative.md" with { type: "text" };
++import deepMd from "../prompts/agents/deep.md" with { type: "text" };
++import engineerMd from "../prompts/agents/engineer.md" with { type: "text" };
++import fastMd from "../prompts/agents/fast.md" with { type: "text" };
++import legacySonicMd from "../prompts/agents/legacy-sonic.md" with { type: "text" };
++import reviewMd from "../prompts/agents/review.md" with { type: "text" };
++import routineMd from "../prompts/agents/routine.md" with { type: "text" };
++import securityMd from "../prompts/agents/security.md" with { type: "text" };
++import visualMd from "../prompts/agents/visual.md" with { type: "text" };
++import visualEditMd from "../prompts/agents/visual-edit.md" with { type: "text" };
+ import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
+ import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
+ import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
+ import taskMd from "../prompts/agents/task.md" with { type: "text" };
+-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+ 
+ import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+ import type { AgentDefinition } from "./types";
+@@ -45,21 +54,16 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
+ 	{ fileName: "scout.md", template: scoutMd },
+ 	{ fileName: "reviewer.md", template: reviewerMd },
+ 	{ fileName: "security-reviewer.md", template: securityReviewerMd },
+-	{
+-		fileName: "task.md",
+-		frontmatter: {
+-			name: "task",
+-			description: "General-purpose subagent with full capabilities for delegated multi-step tasks",
+-			spawns: "*",
+-			model: "@task",
+-			thinkingLevel: AUTO_THINKING,
+-			// No `prewalk` frontmatter: the generic task hand-off (strong model
+-			// plans, then hands off to the smol role) is armed by the
+-			// `task.prewalk` setting (default off) or per agent via /agents
+-			// (task.agentPrewalk).
+-		},
+-		template: taskMd,
+-	},
++	{ fileName: "fast.md", template: fastMd },
++	{ fileName: "routine.md", template: routineMd },
++	{ fileName: "task.md", template: taskMd },
++	{ fileName: "engineer.md", template: engineerMd },
++	{ fileName: "deep.md", template: deepMd },
++	{ fileName: "creative.md", template: creativeMd },
++	{ fileName: "review.md", template: reviewMd },
++	{ fileName: "security.md", template: securityMd },
++	{ fileName: "visual.md", template: visualMd },
++	{ fileName: "visual-edit.md", template: visualEditMd },
+ 	{
+ 		fileName: "sonic.md",
+ 		frontmatter: {
+@@ -68,10 +72,84 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
+ 			model: "@smol",
+ 			thinkingLevel: Effort.Medium,
+ 		},
+-		template: taskMd,
++		template: legacySonicMd,
+ 	},
+ ];
+ 
++// Validate the managed preset contract without duplicating its role bindings:
++// intentional rebinding to another pure role is supported.
++const MANAGED_PRESET_NAMES: Record<string, true> = {
++	scout: true,
++	fast: true,
++	routine: true,
++	task: true,
++	engineer: true,
++	deep: true,
++	review: true,
++	security: true,
++	visual: true,
++	"visual-edit": true,
++	creative: true,
++};
++
++export function isManagedPresetName(name: string): boolean {
++	return Object.hasOwn(MANAGED_PRESET_NAMES, name);
++}
++
++/** Return the effective managed role, rejecting overrides that replace its role plan. */
++export function resolveManagedPresetRole(
++	agent: Pick<AgentDefinition, "name" | "model">,
++	settingsOverride?: string | string[],
++): string | undefined {
++	if (!isManagedPresetName(agent.name)) return undefined;
++	const selectors =
++		settingsOverride === undefined
++			? agent.model
++			: typeof settingsOverride === "string"
++				? [settingsOverride]
++				: settingsOverride;
++	if (
++		(settingsOverride !== undefined && typeof settingsOverride !== "string") ||
++		selectors?.length !== 1 ||
++		!/^@[A-Za-z0-9_-]+$/.test(selectors[0]!)
++	) {
++		throw new Error(
++			`Managed preset "${agent.name}" requires exactly one pure @role selector${settingsOverride === undefined ? "" : " in task.agentModelOverrides"}.`,
++		);
++	}
++	return selectors[0];
++}
++
++function validateManagedPreset(frontmatter: Record<string, unknown>, fields: ParsedAgentFields): void {
++	if (!resolveManagedPresetRole(fields)) return;
++	const rawModel = frontmatter.model;
++	if (
++		!(
++			typeof rawModel === "string" ||
++			(Array.isArray(rawModel) && rawModel.length === 1 && typeof rawModel[0] === "string")
++		)
++	) {
++		throw new Error(`Managed preset "${fields.name}" requires exactly one pure @role selector.`);
++	}
++	for (const key of ["thinking", "thinkingLevel", "effort", "prewalk", "advisor"]) {
++		if (Object.hasOwn(frontmatter, key)) {
++			throw new Error(`Managed preset "${fields.name}" cannot declare ${key}; its role owns the execution plan.`);
++		}
++	}
++	if (fields.spawns === "*" || (fields.spawns?.length ?? 0) > 0) {
++		throw new Error(`Managed preset "${fields.name}" cannot spawn nested agents.`);
++	}
++	if (
++		Object.hasOwn(frontmatter, "spawns") &&
++		!(Array.isArray(frontmatter.spawns) && frontmatter.spawns.length === 0)
++	) {
++		throw new Error(`Managed preset "${fields.name}" must omit spawns or declare [].`);
++	}
++	// Native CSV parsing collapses [] to undefined, whose runtime default is "*".
++	// Managed presets always carry the explicit deny-all spawn scope.
++	fields.spawns = [];
++}
++
+ // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.
+ 
+ export class AgentParsingError extends Error {
+@@ -114,6 +192,11 @@ export function parseAgent(
+ 	if (!fields) {
+ 		throw new AgentParsingError(new Error(`Invalid agent field: ${filePath}\n${content}`), filePath);
+ 	}
++	try {
++		validateManagedPreset(frontmatter, fields);
++	} catch (error) {
++		throw new AgentParsingError(error instanceof Error ? error : new Error(String(error)), filePath);
++	}
+ 	return {
+ 		...fields,
+ 		systemPrompt: body,
+diff --git a/src/task/executor.ts b/src/task/executor.ts
+index 47944dd2c3b82921526ef04020ba62b91ff616ba..955267d3ceb0bf43fb3956263c8ff4b88a149da4 100644
+--- a/src/task/executor.ts
++++ b/src/task/executor.ts
+@@ -30,8 +30,8 @@ import {
+ } from "../async";
+ import type { Rule } from "../capability/rule";
+ import type { EffectiveExtensionRoots } from "../capability/types";
+-import { ModelRegistry } from "../config/model-registry";
+-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
++import { isAuthenticated, kNoAuth, ModelRegistry } from "../config/model-registry";
++import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+ import {
+ 	previewLine,
+ 	replaceTabs,
+@@ -49,6 +49,7 @@ import {
+ 	resolveModelOverride,
+ 	resolveModelOverrideWithAuthFallback,
+ } from "../config/model-resolver";
++import { resolveConfiguredRoleFallbackChain } from "../config/role-fallbacks";
+ import type { PromptTemplate } from "../config/prompt-templates";
+ import {
+ 	buildServiceTierByFamily,
+@@ -304,6 +305,7 @@ export function subagentRetryFallbackRole(id: string): string {
+ interface SubagentRetryFallbackCandidate {
+ 	model: Model<Api>;
+ 	selector: string;
++	patternIndex: number;
+ }
+ 
+ function resolveSubagentRetryFallbackCandidates(
+@@ -314,7 +316,7 @@ function resolveSubagentRetryFallbackCandidates(
+ 	const candidates: SubagentRetryFallbackCandidate[] = [];
+ 	const seen = new Set<string>();
+ 	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+-	for (const pattern of modelPatterns) {
++	for (const [patternIndex, pattern] of modelPatterns.entries()) {
+ 		const resolved = resolveModelOverride([pattern], modelRegistry, settings);
+ 		if (!resolved.model) continue;
+ 		if (disabledProviders.has(resolved.model.provider)) continue;
+@@ -323,39 +325,20 @@ function resolveSubagentRetryFallbackCandidates(
+ 			: formatModelStringWithRouting(resolved.model);
+ 		if (seen.has(selector)) continue;
+ 		seen.add(selector);
+-		candidates.push({ model: resolved.model, selector });
++		candidates.push({ model: resolved.model, selector, patternIndex });
+ 	}
+ 	return candidates;
+ }
+ 
+-/**
+- * Chain a single-model subagent inherits when its own model patterns supply no
+- * fallbacks of their own. The child is pinned to a `subagent:<id>` role whose
+- * chain shadows every configured role chain (see
+- * {@link installSubagentRetryFallbackChain}), so a role-alias request (`@smol`,
+- * the bundled `task` agent's `@task`) MUST inherit that role's chain —
+- * otherwise the pin silently re-routes the child onto the `default` role's
+- * chain. Explicit model selectors keep inheriting `default`: they carry no role
+- * identity, and a role that happens to be assigned the same model must not
+- * capture the child's fallback routing.
+- *
+- * Spawn paths preserve the pre-expansion alias as `modelRole` because their
+- * model patterns are already expanded. Direct callers may still supply an
+- * unexpanded alias through `modelOverride` or `agent.model`; retain that
+- * existing path by deriving the role only when no preserved role was supplied.
+- */
++/** Resolve only the selected role's own or alias-inherited plan; no parent/default leakage. */
+ function resolveSubagentInheritedRetryFallbackChain(
+ 	settings: Settings,
+ 	modelRegistry: ModelRegistry,
+-	role: string | undefined,
+-): string[] | undefined {
++	role: string,
++): string[] {
+ 	const configuredChains = cfgRetryFallbackChains.get(settings);
+-	// An explicitly emptied role chain means "no fallbacks", not "inherit
+-	// default" — mirrors expandDefaultRetryFallbackChains.
+-	const fallbackChain = (role !== undefined ? configuredChains?.[role] : undefined) ?? configuredChains?.default;
+-	if (!Array.isArray(fallbackChain) || !fallbackChain.every(entry => typeof entry === "string")) {
+-		return undefined;
+-	}
++	const fallbackChain =
++		resolveConfiguredRoleFallbackChain(role, configuredChains, name => settings.getModelRole(name)) ?? [];
+ 	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+ 	return fallbackChain.filter(entry => {
+ 		const resolved = resolveModelOverride([entry], modelRegistry, settings);
+@@ -367,23 +350,18 @@ function installSubagentRetryFallbackChain(args: {
+ 	settings: Settings;
+ 	id: string;
+ 	candidates: SubagentRetryFallbackCandidate[];
+-	inheritedFallbackChain: string[] | undefined;
+ 	model: Model<Api> | undefined;
+-	authFallbackUsed: boolean;
++	modelPatterns: string[];
++	thinkingLevel: ConfiguredThinkingLevel | undefined;
+ }): string | undefined {
+-	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
+-	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
++	const { settings, id, candidates, model } = args;
++	if (!model || candidates.length === 0) return undefined;
+ 
+-	const selectedIndex = candidates.findIndex(
+-		candidate => candidate.model.provider === model.provider && candidate.model.id === model.id,
+-	);
++	const selectedSelector = formatModelSelectorValue(formatModelStringWithRouting(model), args.thinkingLevel);
++	const selectedIndex = candidates.findIndex(candidate => candidate.selector === selectedSelector);
+ 	if (selectedIndex < 0) return undefined;
+-	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
+-	// A single configured model may reuse its role's (or the default) configured chain, but never an implicit parent fallback.
+-	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
+-	if (!Array.isArray(fallbackChain) || !fallbackChain.every(entry => typeof entry === "string")) {
+-		return undefined;
+-	}
++	// A role owns even an empty tail; never restart its earlier candidates.
++	const fallbackChain = args.modelPatterns.slice(candidates[selectedIndex].patternIndex + 1);
+ 
+ 	const role = subagentRetryFallbackRole(id);
+ 	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
+@@ -4530,11 +4508,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 		// dispatch and persisted revival do, never the spawn-time copy.
+ 		const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(capture.settings.parent));
+ 		capture.spec.prompt.reviving = true;
+-		// A session-local switch since spawn (a prewalk handoff) owns the model and effort: the
+-		// transcript restores the effort, and the spawn selection only backs the model up when it is
+-		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent.
+-		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
+-		const sessionLocalModel = capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
++		// Ordinary workers restore the transcript's latest logical role or
++		// concrete temporary selection. Per-call workers keep the exact spawn
++		// model and effort; their dispatch approval guard remains installed.
+ 		try {
+ 			try {
+ 				const options = buildSubagentSessionOptions(
+@@ -4546,22 +4522,17 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+ 				);
+ 				({ session: revived } = await createAgentSession({
+ 					...options,
+-					...(sessionLocalModel
+-						? {
++					...(capture.perCallModel
++						? {}
++						: {
+ 								model: undefined,
+-								modelPattern: [
+-									sessionLocalModel,
+-									...(options.model
+-										? [formatModelStringWithRouting(options.model)]
+-										: options.modelPattern === undefined
+-											? []
+-											: [options.modelPattern].flat()),
+-								],
++								modelRole: undefined,
++								modelPattern: undefined,
++								modelPatternParentFallback: undefined,
+ 								modelPatternFallbackRole: undefined,
+ 								modelPatternDefaultFallbackChain: undefined,
+ 								thinkingLevel: undefined,
+-							}
+-						: undefined),
++							}),
+ 					oauthAccountPools: Object.hasOwn(agentAccountPools, capture.agentName)
+ 						? agentAccountPools[capture.agentName]
+ 						: undefined,
+@@ -4731,7 +4702,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
+ 	const parentDepth = options.taskDepth ?? 0;
+ 	const childDepth = parentDepth + 1;
+-	const restrictToolNames = options.restrictToolNames === true;
++	// Creative is analysis-only: do not auto-grant memory writes, MCP or extension tools.
++	const restrictToolNames = options.restrictToolNames === true || agent.name === "creative";
+ 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
+ 
+ 	// Add tools if specified. Unstructured runs never get `yield`, even when
+@@ -4739,8 +4711,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 	let toolNames: string[] | undefined;
+ 	if (agent.tools) {
+ 		toolNames = structured ? agent.tools : agent.tools.filter(name => name !== "yield");
+-		// Auto-include task tool if spawns defined but task not in tools
+-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
++		// Auto-include task tool if spawns allows delegation and task not in tools
++		const canSpawn = agent.spawns === "*" || (agent.spawns?.length ?? 0) > 0;
++		if (!restrictToolNames && canSpawn && !toolNames.includes("task") && !atMaxDepth) {
+ 			toolNames = [...toolNames, "task"];
+ 		}
+ 	}
+@@ -4918,31 +4891,76 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 						: undefined) ??
+ 					null)
+ 				: undefined;
+-			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+-			const inheritedRetryFallbackChain =
+-				configuredModelPatterns.length === 1
+-					? resolveSubagentInheritedRetryFallbackChain(
+-							subagentSettings,
+-							modelRegistry,
+-							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
+-						)
+-					: undefined;
++			const logicalModelRole = options.perCallModelGrants
++				? undefined
++				: (modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings));
++			const configuredModelPatterns = options.perCallModelGrants
++				? modelPatterns
++				: resolveConfiguredModelPatterns(modelPatterns, subagentSettings);
++			const inheritedRetryFallbackChain = logicalModelRole
++				? resolveSubagentInheritedRetryFallbackChain(subagentSettings, modelRegistry, logicalModelRole)
++				: undefined;
++			const primaryThinkingLevel = configuredModelPatterns[0]
++				? parseModelString(configuredModelPatterns[0], {
++						allowMaxSuffix: true,
++						allowAutoAlias: true,
++						isLiteralModelId: (provider, modelId) => modelRegistry.find(provider, modelId) !== undefined,
++					})?.thinkingLevel
++				: undefined;
++			const startupModelPatterns = [
++				...configuredModelPatterns,
++				...(logicalModelRole ? (inheritedRetryFallbackChain ?? []) : []),
++			].map((pattern, patternIndex) => {
++				if (!logicalModelRole || patternIndex === 0 || primaryThinkingLevel === undefined) return pattern;
++				const parsed = parseModelString(pattern, {
++					allowMaxSuffix: true,
++					allowAutoAlias: true,
++					isLiteralModelId: (provider, modelId) => modelRegistry.find(provider, modelId) !== undefined,
++				});
++				return parsed?.thinkingLevel === undefined ? formatModelSelectorValue(pattern, primaryThinkingLevel) : pattern;
++			});
++			let resolution: {
++				model?: Model<Api>;
++				thinkingLevel?: ConfiguredThinkingLevel;
++				explicitThinkingLevel: boolean;
++				authFallbackUsed: boolean;
++				warning?: string;
++			};
++			if (logicalModelRole) {
++				resolution = { explicitThinkingLevel: false, authFallbackUsed: false };
++				for (const pattern of startupModelPatterns) {
++					const candidate = resolveModelOverride([pattern], modelRegistry, subagentSettings);
++					if (!candidate.model || (allowedProvider !== undefined && candidate.model.provider !== allowedProvider)) continue;
++					let apiKey: string | undefined;
++					try {
++						apiKey = await awaitAbortable(modelRegistry.getApiKey(candidate.model, id));
++					} catch {
++						signal?.throwIfAborted();
++						continue;
++					}
++					if (apiKey !== kNoAuth && !isAuthenticated(apiKey)) continue;
++					resolution = { ...candidate, authFallbackUsed: false };
++					break;
++				}
++			} else {
++				resolution = await awaitAbortable(
++					resolveModelOverrideWithAuthFallback(
++						startupModelPatterns,
++						options.parentActiveModelPattern,
++						modelRegistry,
++						subagentSettings,
++						id,
++						{ exactOnly: !!options.perCallModelGrants, allowedProvider },
++					),
++				);
++			}
+ 			const {
+ 				model,
+ 				thinkingLevel: resolvedThinkingLevel,
+ 				explicitThinkingLevel,
+ 				authFallbackUsed,
+ 				warning: modelResolutionWarning,
+-			} = await awaitAbortable(
+-				resolveModelOverrideWithAuthFallback(
+-					modelPatterns,
+-					options.parentActiveModelPattern,
+-					modelRegistry,
+-					settings,
+-					id,
+-					{ exactOnly: !!options.perCallModelGrants, allowedProvider },
+-				),
+-			);
++			} = resolution;
+ 			if (cfgOffline.get(settings) && !model) {
+ 				throw new Error("Offline mode: no subagent model is available on the active parent provider.");
+ 			}
+@@ -4985,22 +5003,18 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 								resolvedModel,
+ 								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
+ 							);
+-			const retryFallbackRole = installSubagentRetryFallbackChain({
+-				settings: subagentSettings,
+-				id,
+-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings).filter(
+-					candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider,
+-				),
+-				inheritedFallbackChain:
+-					allowedProvider === undefined
+-						? inheritedRetryFallbackChain
+-						: inheritedRetryFallbackChain?.filter(entry => {
+-								const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
+-								return candidate?.provider === allowedProvider;
+-							}),
+-				model,
+-				authFallbackUsed,
+-			});
++			const retryFallbackRole = logicalModelRole
++				? installSubagentRetryFallbackChain({
++						settings: subagentSettings,
++						id,
++						candidates: resolveSubagentRetryFallbackCandidates(startupModelPatterns, modelRegistry, subagentSettings).filter(
++							candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider,
++						),
++						model,
++						modelPatterns: startupModelPatterns,
++						thinkingLevel: resolvedThinkingLevel,
++					})
++				: undefined;
+ 			if (retryFallbackRole) {
+ 				logger.debug("Configured subagent runtime model fallback chain", {
+ 					role: retryFallbackRole,
+@@ -5177,13 +5191,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 					oauthAccountPools: options.oauthAccountPools,
+ 					inheritedSessionAgents: options.inheritedSessionAgents,
+ 					model,
+-					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+-					modelPatternParentFallback:
+-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+-					modelPatternFallbackRole:
+-						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+-					modelPatternDefaultFallbackChain:
+-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
++					modelRole: retryFallbackRole ?? logicalModelRole,
++					modelPattern: model ? undefined : startupModelPatterns,
++					modelPatternParentFallback: model || logicalModelRole ? undefined : options.parentActiveModelPattern,
++					modelPatternFallbackRole: !model && logicalModelRole ? subagentRetryFallbackRole(id) : undefined,
++					modelPatternDefaultFallbackChain: model ? undefined : inheritedRetryFallbackChain,
+ 					thinkingLevel: effectiveThinkingLevel,
+ 					...(perCallModelGrants || allowedProvider !== undefined
+ 						? {
+@@ -5437,7 +5449,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
+ 				tools: persistedSubagentTools,
+ 				mountedTools: session.getMountedXdevToolNames(),
+ 				agent: agent.name,
+-				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
++				modelRole: logicalModelRole,
+ 				resolvedModel: progress.resolvedModel,
+ 				...(perCallModelGrants
+ 					? {
+diff --git a/src/task/index.ts b/src/task/index.ts
+index 912ca741b008f1af79a53f92ae899ab2d4a0c4b0..950eb24674ee0f7c6d4e19b96bae9b3801dcedb5 100644
+--- a/src/task/index.ts
++++ b/src/task/index.ts
+@@ -49,6 +49,7 @@ import { AsyncJobError, type AsyncJobManagerApi } from "../async";
+ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
+ import { AgentRegistry, isResumable } from "../registry/agent-registry";
+ import { type DiscoveryResult, discoverAgents } from "./discovery";
++import { resolveManagedPresetRole } from "./agents";
+ import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+ import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
+ import { generateTaskName } from "./name-generator";
+@@ -74,6 +75,7 @@ import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
+ 
+ import { cfgAsyncEnabled } from "../tools/settings";
+ import {
++	cfgTaskAgentModelOverrides,
+ 	cfgTaskBatch,
+ 	cfgTaskDisabledAgents,
+ 	cfgTaskEnableEffort,
+@@ -146,6 +148,7 @@ export {
+ interface TaskDescriptionOptions {
+ 	agents: AgentDefinition[];
+ 	sessionAgents: readonly AgentDefinition[];
++	agentModelOverrides: Record<string, string | string[]>;
+ 	isolationEnabled: boolean;
+ 	applyIsolatedChanges: boolean;
+ 	disabledAgents: string[];
+@@ -175,14 +178,28 @@ function renderDescription(options: TaskDescriptionOptions): string {
+ 		const allowed = new Set(spawnPolicy.allowedAgents);
+ 		filteredAgents = filteredAgents.filter(agent => allowed.has(agent.name));
+ 	}
+-	const renderedAgents = filteredAgents.map(agent => ({
+-		name: agent.name,
+-		description: agent.description,
+-		readOnly: isReadOnlyAgent(agent),
+-		blocking: agent.blocking === true,
+-		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
+-		structured: !options.structured && agent.structured === true,
+-	}));
++	const renderedAgents = filteredAgents.map(agent => {
++		const override = options.agentModelOverrides[agent.name];
++		let modelMetadata: string;
++		try {
++			const role = resolveManagedPresetRole(agent, override);
++			const selectors =
++				override === undefined ? agent.model : typeof override === "string" ? [override] : override;
++			modelMetadata = role ?? selectors?.join(", ") ?? "session model";
++			if (override !== undefined) modelMetadata += " (settings override)";
++		} catch {
++			modelMetadata = "INVALID settings override: expected one pure @role";
++		}
++		return {
++			name: agent.name,
++			description: agent.description,
++			modelMetadata,
++			readOnly: isReadOnlyAgent(agent),
++			blocking: agent.blocking === true,
++			// Marked only while `task.structured` is off; with it on, every agent's result is structured.
++			structured: !options.structured && agent.structured === true,
++		};
++	});
+ 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+ 	return prompt.render(taskDescriptionTemplate, {
+ 		agents: renderedAgents,
+@@ -857,6 +874,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 		return renderDescription({
+ 			agents,
+ 			sessionAgents,
++			agentModelOverrides: cfgTaskAgentModelOverrides.get(this.session.settings),
+ 			isolationEnabled: !planMode && isolationEnabled,
+ 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
+ 			disabledAgents,
+diff --git a/src/task/persisted-revive.ts b/src/task/persisted-revive.ts
+index 82c5a852e88086715432bb7e09b35e6a5d211c57..d0cd472bcf3dca78473b19828541a6aff0cd5922 100644
+--- a/src/task/persisted-revive.ts
++++ b/src/task/persisted-revive.ts
+@@ -364,30 +364,44 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 			: undefined),
+ 		...compactionThresholdSettings(init.compactionThreshold),
+ 	});
+-	// Restore the `subagent:<id>` fallback chain the spawn installed; the
+-	// transcript alone cannot rebuild it (multi-model agent patterns and
+-	// inherited role chains are resolved only at spawn).
+-	if (init.retryFallback) {
+-		installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
+-	}
+-	// Account pools are owner policy, like the extension roots below: take the
+-	// live exact-name `task.agentAccountPools` entry, never a transcript copy.
+-	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(spec.settings));
+-	const oauthAccountPools =
+-		init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
+-	const spawnModelPattern =
+-		init.modelRole && init.modelRole !== "default"
+-			? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
+-			: init.resolvedModel;
+-	// A session-local switch since spawn (a prewalk handoff) is the model the agent
+-	// was working on; the spawn selection only backs it up when it is unavailable.
+-	const sessionLocalModel = reopened.getSessionLocalModelChange()?.model;
+-	// A per-call worker revives only onto its exact saved model: no role alias, no auth fallback.
+-	const persistedModelPattern = init.perCallModel
+-		? undefined
+-		: sessionLocalModel
+-			? [sessionLocalModel, ...(spawnModelPattern === undefined ? [] : [spawnModelPattern].flat())]
+-			: spawnModelPattern;
++			// Seed the original spawn plan for legacy files. SDK startup restores a
++			// newer committed model_change plan before resolving its selected role,
++			// including extension-scoped roles whose settings lease has ended.
++			// Per-call workers never restore a role or a fallback plan.
++			const scopedRole = subagentRetryFallbackRole(ref.id);
++			const selectedRole = init.perCallModel ? undefined : reopened.getLastModelChangeRole({ skipEphemeral: true });
++			const ownsPersistedPlan =
++				!init.perCallModel && init.retryFallback !== undefined && (!selectedRole || selectedRole === scopedRole);
++			if (ownsPersistedPlan) {
++				installRetryFallbackRole(subagentSettings, scopedRole, init.retryFallback!);
++			}
++			// Account pools are owner policy, like the extension roots below: take the
++			// live exact-name `task.agentAccountPools` entry, never a transcript copy.
++			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(spec.settings));
++			const oauthAccountPools =
++				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
++			const modelRole = init.perCallModel
++				? undefined
++				: ownsPersistedPlan
++					? scopedRole
++					: selectedRole === "temporary"
++						? undefined
++						: (selectedRole ?? init.modelRole);
++			// A later explicit selection supersedes the spawn plan, even when
++			// retry/prewalk entries follow it.
++			const temporaryModel =
++				selectedRole === "temporary"
++					? (reopened.buildSessionContext().models.temporary ?? init.resolvedModel)
++					: undefined;
++			const persistedModelPattern = init.perCallModel
++				? undefined
++				: temporaryModel
++					? temporaryModel
++					: ownsPersistedPlan
++						? [init.retryFallback!.primary, ...init.retryFallback!.chain]
++						: modelRole
++							? [formatModelRoleAlias(modelRole)]
++							: init.resolvedModel;
+ 	// Older session files persisted the synthetic xd:// write transport in the
+ 	// enabled set. A read-only agent definition could never grant full write,
+ 	// so remove that transport name before replaying tools as explicit grants.
+@@ -416,7 +430,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
+ 			modelRegistry: spec.modelRegistry,
+ 			...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
+ 			...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+-			modelPatternParentFallback: init.perCallModel ? undefined : init.resolvedModel,
++			modelRole,
++			modelPatternParentFallback: init.perCallModel || modelRole ? undefined : init.resolvedModel,
+ 			settings: subagentSettings,
+ 			sessionManager: reopened,
+ 			agentId: ref.id,
+diff --git a/src/task/structured-subagent.ts b/src/task/structured-subagent.ts
+index 938d10a3e49c43fb24788f6ca6282fe5cf82db5f..d2d84be1c6bc4bf001e9b3e8d9cfcf22394596d1 100644
+--- a/src/task/structured-subagent.ts
++++ b/src/task/structured-subagent.ts
+@@ -42,6 +42,7 @@ import type { ToolSession } from "../tools";
+ import { isIrcEnabled } from "../irc/messaging";
+ import { buildOutputValidator } from "../tools/output-schema-validator";
+ import { trackLateCleanup } from "../utils/late-cleanup";
++import { isManagedPresetName, resolveManagedPresetRole } from "./agents";
+ import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+ import { renderStepPrompts } from "./steps";
+ import { type ExecutorOptions, runSubprocess, type SubagentToolResult, usesYield } from "./executor";
+@@ -554,6 +555,23 @@ export async function resolveEffectiveSubagentPolicy(
+ 		}
+ 	}
+ 	const agentModelOverrides = cfgTaskAgentModelOverrides.get(request.session.settings);
++	try {
++		resolveManagedPresetRole(agent, agentModelOverrides[agentName]);
++	} catch (error) {
++		throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
++			cause: error,
++		});
++	}
++	const perCallSelector: unknown = request.perCallModel;
++	if (
++		isManagedPresetName(agent.name) &&
++		(perCallSelector !== undefined || (request.invocationKind === "task" && request.model !== undefined))
++	) {
++		throw new StructuredSubagentError(
++			"preflight",
++			`Managed preset "${agent.name}" does not allow per-call model overrides; its role owns the execution plan.`,
++		);
++	}
+ 	const agentServiceTierOverrides = validateAgentServiceTierOverrides(
+ 		cfgTaskAgentServiceTierOverrides.get(request.session.settings),
+ 	);
+@@ -568,7 +586,6 @@ export async function resolveEffectiveSubagentPolicy(
+ 		: undefined;
+ 	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
+ 	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
+-	const perCallSelector: unknown = request.perCallModel;
+ 	const parentActiveModel = request.session.getActiveModel?.();
+ 	const userTaggedEffort =
+ 		sessionAgents.includes(agent) &&

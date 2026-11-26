@@ -1,0 +1,2158 @@
+diff --git a/dist/types/config/model-resolver.d.ts b/dist/types/config/model-resolver.d.ts
+index 596681a8dbfff06e34df425775689159b036115e..485c3669ad89acfa18fecd9a5e5ac598d4708447 100644
+--- a/dist/types/config/model-resolver.d.ts
++++ b/dist/types/config/model-resolver.d.ts
+@@ -21,6 +21,7 @@ import { type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+ import { type ModelRegistry } from "./model-registry.js";
+ import { type ModelRole } from "./model-roles.js";
+ import type { Settings } from "./settings.js";
++export { resolveConfiguredRoleFallbackChain } from "./role-fallbacks.js";
+ /**
+  * Pick the first auto-selectable provider-default model in availability order.
+  * A provider's default is the model its discovery marks as the account default
+@@ -256,10 +257,10 @@ export declare function resolveModelOverride(modelPatterns: string[], modelRegis
+  */
+ export declare function disabledProviderIds(settings?: Settings): ReadonlySet<string>;
+ /**
+- * Resolve a saved session model selector (`provider/id`, optionally with a
+- * thinking suffix) to a registered model whose provider is enabled and has
+- * credentials configured. Startup resume and runtime session switches share
+- * this lookup, so both restore the same models.
++ * Resolve a saved session model selector (`provider/id`, optionally with
++ * `@upstream` routing and a thinking suffix) within its exact provider.
++ * The provider must be enabled and have credentials configured. Startup resume
++ * and runtime session switches share this lookup.
+  *
+  * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
+  * tokens and runs no `!command` keys, which would stall a restore on the network.
+diff --git a/dist/types/config/role-fallbacks.d.ts b/dist/types/config/role-fallbacks.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a91fb84f776694273dac6c14a0e93d8112bdd66a
+--- /dev/null
++++ b/dist/types/config/role-fallbacks.d.ts
+@@ -0,0 +1,2 @@
++/** Resolve only explicitly configured chains, inheriting a pure role alias's full plan. */
++export declare function resolveConfiguredRoleFallbackChain(role: string, chains: Readonly<Record<string, readonly string[]>>, getModelRole: (role: string) => string | undefined): readonly string[] | undefined;
+diff --git a/dist/types/modes/controllers/selector-controller.d.ts b/dist/types/modes/controllers/selector-controller.d.ts
+index c72927466ec0648f222afa12046d75d6110507c5..92155c47851541b4586e2dd98be80180ea5efa6e 100644
+--- a/dist/types/modes/controllers/selector-controller.d.ts
++++ b/dist/types/modes/controllers/selector-controller.d.ts
+@@ -77,7 +77,7 @@ export declare class SelectorController {
+      * transcript exceeds the target's context window, mirroring an over-context
+      * pick in the alt+p picker. Failures surface as status errors.
+      */
+-    switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
++    switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel, role?: string, selector?: string): Promise<void>;
+     showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
+     /** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
+     showUserMessageSelector(startAt?: string): void;
+diff --git a/dist/types/modes/interactive-mode.d.ts b/dist/types/modes/interactive-mode.d.ts
+index 1bd015c88b4ceb4192f939e08b00dca572e51403..9f9d49d84c9f276f6c8fa580738505a4739e20b5 100644
+--- a/dist/types/modes/interactive-mode.d.ts
++++ b/dist/types/modes/interactive-mode.d.ts
+@@ -741,7 +741,7 @@ export declare class InteractiveMode implements InteractiveModeContext {
+     showModelSelector(options?: {
+         temporaryOnly?: boolean;
+     }): void;
+-    switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
++    switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel, role?: string, selector?: string): Promise<void>;
+     showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
+     showUserMessageSelector(startAt?: string): void;
+     showCopySelector(): void;
+diff --git a/dist/types/modes/types.d.ts b/dist/types/modes/types.d.ts
+index 6d745f6d359d5db7afea22f57c7f0e1b6bd16132..c5ea035863648346909539cf1433968c0c2740f0 100644
+--- a/dist/types/modes/types.d.ts
++++ b/dist/types/modes/types.d.ts
+@@ -608,7 +608,7 @@ export interface InteractiveModeContext {
+         temporaryOnly?: boolean;
+     }): void;
+     /** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
+-    switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
++    switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel, role?: string, selector?: string): Promise<void>;
+     showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
+     showUserMessageSelector(startAt?: string): void;
+     showCopySelector(): void;
+diff --git a/dist/types/sdk.d.ts b/dist/types/sdk.d.ts
+index c4c9ab4d033d71934b557d2feb3311c4e45ba36f..039b77de695fcaf3dbec66b2f31bf0a495b3f1fe 100644
+--- a/dist/types/sdk.d.ts
++++ b/dist/types/sdk.d.ts
+@@ -80,7 +80,7 @@ export interface CreateAgentSessionOptions {
+     oauthAccountPools?: OAuthAccountPools;
+     /** Model to use. Default: from settings, else first available */
+     model?: Model;
+-    /** Role whose alias selected {@link model} (CLI `--model pi/<role>`); retries walk that role's fallback chain. */
++    /** Explicit role owning this model's closed retry plan; concrete selections omit it. */
+     modelRole?: string;
+     /**
+      * Allow an explicit {@link model} to be rebound to its same-selector registry
+diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
+index c5fd50bba4faed0469bdd4ed70f5636da1dc940c..d4b77f0a9e5c2028965d5988fafb259f1e82e492 100644
+--- a/dist/types/session/agent-session.d.ts
++++ b/dist/types/session/agent-session.d.ts
+@@ -1319,7 +1319,7 @@ export declare class AgentSession implements SettingsScope, AgentViewSession {
+      */
+     setModel(model: Model, role?: string, options?: {
+         selector?: string;
+-        thinkingLevel?: ThinkingLevel;
++        thinkingLevel?: ConfiguredThinkingLevel;
+         persist?: boolean;
+     }): Promise<{
+         switched: boolean;
+@@ -1616,7 +1616,7 @@ export declare class AgentSession implements SettingsScope, AgentViewSession {
+         preserveLocalCwd?: boolean;
+         /**
+          * Use this model instead of the target's saved one, like an explicit
+-         * `--model` at startup, and record it in the session when it differs.
++         * `--model` at startup, recording concrete selection even for the same model.
+          */
+         model?: Model;
+         /** Keep the current model without restoring the target's (collab replicas mirror the host's model). */
+diff --git a/dist/types/session/model-controls.d.ts b/dist/types/session/model-controls.d.ts
+index 69afe41230863ac609c51b5edd0ccb79d95f3190..17438aa5a84f8757480a952fe59fd713a7066945 100644
+--- a/dist/types/session/model-controls.d.ts
++++ b/dist/types/session/model-controls.d.ts
+@@ -91,8 +91,10 @@ export declare class ModelControls {
+     resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue;
+     setModel(model: Model, role?: string, options?: {
+         selector?: string;
+-        thinkingLevel?: ThinkingLevel;
++        thinkingLevel?: ConfiguredThinkingLevel;
+         persist?: boolean;
++        beforeCommit?: () => void;
++        signal?: AbortSignal;
+     }): Promise<{
+         switched: boolean;
+     }>;
+diff --git a/dist/types/session/retry-fallback-chains.d.ts b/dist/types/session/retry-fallback-chains.d.ts
+index 49198e1b69dc48e9e4540aa5812407bc258af619..691f62e0252cbb851fd99476cf128edd65dffd65 100644
+--- a/dist/types/session/retry-fallback-chains.d.ts
++++ b/dist/types/session/retry-fallback-chains.d.ts
+@@ -88,12 +88,12 @@ export declare function formatRetryFallbackBaseSelector(selector: RetryFallbackS
+ export declare function isKnownProvider(modelRegistry: Pick<RetryFallbackModelLookup, "hasProvider">, provider: string): boolean;
+ /** Apply the configured default chain to roles without their own chain. */
+ export declare function expandDefaultRetryFallbackChains(configuredChains: RetryFallbackChains, roleNames: readonly string[]): RetryFallbackChains;
+-/** Resolves configured fallback chains, applying the default chain to named roles. */
++/** Resolves alias inheritance before applying chat-role default chains. */
+ export declare function getRetryFallbackChains(settings: Settings): RetryFallbackChains;
+ /**
+- * A dynamic role pinned to one model selector with its own fallback chain.
+- * Subagents own one under `subagent:<id>`; `session_init` persists it so cold
+- * revival restores the same routing the spawn installed.
++ * A role pinned to an ordered, closed selector plan. `session_init` retains
++ * the original spawn plan; committed `model_change` entries retain subsequent
++ * selections independently of the lifetime of their scoped settings.
+  */
+ export interface RetryFallbackRole {
+     /** Selector the role is assigned (the chain's primary). */
+@@ -101,7 +101,7 @@ export interface RetryFallbackRole {
+     /** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
+     chain: string[];
+ }
+-/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
++/** Reads a role's full ordered plan, closing aliases without borrowing any candidate's own chain. */
+ export declare function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined;
+ /**
+  * Assigns `role` its primary and installs its chain ahead of every configured
+@@ -128,9 +128,9 @@ export declare function getRetryFallbackRevertPolicy(settings: Settings): RetryF
+ /** Whether `retry.fallbackOn` lets a failure walk the fallback chain. */
+ export declare function retryFallbackAdmits(fallbackOn: RetrySettings["fallbackOn"], usageLimit: boolean): boolean;
+ /**
+- * Resolve the chain key for a concrete selector by specificity: exact model,
+- * longest matching wildcard, hinted role, then matching role keys with
+- * `default` preferred over other shared assignments, then default.
++ * An explicitly selected role owns its closed chain. Without role provenance,
++ * only concrete model keys and provider wildcards apply; shared model identity
++ * never implies a role assignment.
+  */
+ export declare function resolveRetryFallbackChainKey(context: RetryFallbackResolutionContext, currentSelector: string, currentModel?: Model | null, roleHint?: string): string | undefined;
+ /**
+diff --git a/dist/types/session/role-models.d.ts b/dist/types/session/role-models.d.ts
+index 6fa6c61fd1d9a496be35b31de0fd613fd35c4dc0..5bd82e5e9b78bccbfbe47baa4d96164cf074e163 100644
+--- a/dist/types/session/role-models.d.ts
++++ b/dist/types/session/role-models.d.ts
+@@ -1,10 +1,10 @@
+-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+ import type { Model } from "@oh-my-pi/pi-ai";
+ import type { ModelRegistry } from "../config/model-registry.js";
+ import { type ResolvedModelRoleValue } from "../config/model-resolver.js";
+ import type { Settings } from "../config/settings.js";
+ /** Formats a role assignment while preserving its explicit thinking selector. */
+-export declare function formatRoleModelValue(settings: Settings, modelRegistry: ModelRegistry, role: string, model: Model, selectorOverride?: string, thinkingLevelOverride?: ThinkingLevel): string;
++export declare function formatRoleModelValue(settings: Settings, modelRegistry: ModelRegistry, role: string, model: Model, selectorOverride?: string, thinkingLevelOverride?: ConfiguredThinkingLevel): string;
+ /** Resolves a configured model target relative to the current provider. */
+ export declare function resolveConfiguredModelTarget(configuredTarget: string | undefined, currentModel: Model, availableModels: Model[]): Model | undefined;
+ /** Resolves a model's configured context-promotion target. */
+diff --git a/dist/types/session/session-context.d.ts b/dist/types/session/session-context.d.ts
+index d25280bdd121cdc6c711294470b0b65eb5923ade..0c8a04c856a9655277de6a9e5f72c7f9696c6176 100644
+--- a/dist/types/session/session-context.d.ts
++++ b/dist/types/session/session-context.d.ts
+@@ -1,7 +1,7 @@
+ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+ import { type Model, type OpenAIResponsesHistoryPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+ import * as snapcompact from "@oh-my-pi/snapcompact";
+-import { type CompactionEntry, type CustomMessageEntry, type SessionEntry, type SessionMessageEntry } from "./session-entries.js";
++import { type CompactionEntry, type CustomMessageEntry, type ModelChangeEntry, type SessionEntry, type SessionMessageEntry } from "./session-entries.js";
+ /** Byte budget and frame resolution for one archive's prompt blocks, as context rebuilding applies them. */
+ export declare function snapcompactHistoryBlockOptions(archive: snapcompact.Archive, options: BuildSessionContextOptions | undefined): snapcompact.HistoryBlockOptions;
+ export interface SessionContext {
+@@ -12,6 +12,8 @@ export interface SessionContext {
+     serviceTier?: ServiceTierByFamily;
+     /** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
+     models: Record<string, string>;
++    /** Latest committed selection, excluding retry/prewalk transitions. */
++    selectedModelChange?: ModelChangeEntry;
+     /** Names of TTSR rules that have been injected this session */
+     injectedTtsrRules: string[];
+     /** Active mode (e.g. "plan") or "none" if no special mode is active */
+@@ -31,7 +33,7 @@ export interface SessionContext {
+      */
+     nextCacheMissExplained?: boolean;
+ }
+-/** Lists session model strings to try when restoring, in fallback order. */
++/** Restore the selected non-ephemeral identity without borrowing another role's model. */
+ export declare function getRestorableSessionModels(models: Readonly<Record<string, string>>, lastModelChangeRole: string | undefined): string[];
+ export declare function getLatestCompactionEntry(entries: readonly SessionEntry[]): CompactionEntry | null;
+ export interface BuildSessionContextOptions {
+diff --git a/dist/types/session/session-entries.d.ts b/dist/types/session/session-entries.d.ts
+index 0b3b29ee38543d5e73e005a1ae94ea29dbf23741..8918dd5b422a0150e8f46af7dcdd0cc836a81ad6 100644
+--- a/dist/types/session/session-entries.d.ts
++++ b/dist/types/session/session-entries.d.ts
+@@ -176,6 +176,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
+     role?: string;
+     /** True when this transition selected a retry-fallback model rather than the configured model. */
+     resolvedModelIsFallback?: boolean;
++    /** Closed role plan captured at a committed selection; absent in older sessions. */
++    retryFallback?: RetryFallbackRole;
+ }
+ export interface ServiceTierChangeEntry extends SessionEntryBase {
+     type: "service_tier_change";
+diff --git a/dist/types/session/session-manager.d.ts b/dist/types/session/session-manager.d.ts
+index 5ca7594997efe32ddc0699cb4ebd40aa697b9de3..a6ab53c35658952e850b06a92cd7aff1f98f3632 100644
+--- a/dist/types/session/session-manager.d.ts
++++ b/dist/types/session/session-manager.d.ts
+@@ -474,7 +474,7 @@ export declare class SessionManager {
+      * @param role Optional role (default: "default")
+      * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+      */
+-    appendModelChange(model: string, role?: string, resolvedModelIsFallback?: boolean): string;
++    appendModelChange(model: string, role?: string, resolvedModelIsFallback?: boolean, retryFallback?: RetryFallbackRole): string;
+     appendSessionInit(init: {
+         systemPrompt: string[];
+         task: string;
+diff --git a/dist/types/tiny/online-candidates.d.ts b/dist/types/tiny/online-candidates.d.ts
+index 43cab1ede8d40cbd4aa4c0cb3637cb0cebb836cf..cee4ecbd4879c7a579b592b23eb2440384fd84b6 100644
+--- a/dist/types/tiny/online-candidates.d.ts
++++ b/dist/types/tiny/online-candidates.d.ts
+@@ -8,11 +8,9 @@ export interface OnlineTinyCandidate {
+ /**
+  * Collect unique online models for lightweight background tasks.
+  *
+- * Order: each requested role's primary, then canonical retry fallback chains
+- * traversed transitively (so a hop onto B also consults B's own chain).
++ * Order: each explicitly requested role's primary, then its closed retry plan.
+  * Disabling model fallback restricts attempts to the first resolvable primary,
+- * unless `tryAllRoles` asks for the explicit role chain without configured
+- * retry-chain expansion.
++ * unless `tryAllRoles` requests all explicit role primaries (as titles do).
+  */
+ export declare function collectOnlineTinyCandidates(roles: readonly string[], settings: Settings, availableModels: Model<Api>[], options?: {
+     tryAllRoles?: boolean;
+@@ -20,13 +18,7 @@ export declare function collectOnlineTinyCandidates(roles: readonly string[], se
+ /**
+  * Expand one model's own `retry.fallbackChains` transitively.
+  *
+- * With a role hint, use the role's configured chain even when the role has no
+- * configured primary, else the configured `default` chain, which roles that are
+- * not model kinds inherit as in `collectOnlineTinyCandidates`. Only configured
+- * chains apply: a role's built-in priority list never adds fallbacks, so a
+- * retry cannot move to a model the user did not select. Model-keyed and
+- * wildcard chains retain their precedence.
+- * Without a role hint, consult only the configured model-keyed / wildcard /
+- * matching-role keys that `resolveRetryFallbackChainKey` already selects.
++ * With an explicit role hint, expand only its configured closed chain.
++ * Without a role hint, consult only concrete model-keyed and wildcard chains.
+  */
+ export declare function expandOnlineTinyModelFallbacks(model: Model<Api>, settings: Settings, availableModels: Model<Api>[], role?: string): Model<Api>[];
+diff --git a/src/config/model-resolver.ts b/src/config/model-resolver.ts
+index 4ce55898ee70414f39f0bb6255dcf0baf878b13c..dbc9e147f4b47f5fc97cc687cc04b2b371461771 100644
+--- a/src/config/model-resolver.ts
++++ b/src/config/model-resolver.ts
+@@ -61,6 +61,8 @@ import type { Settings } from "./settings";
+ 
+ import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
+ import { cfgRetryFallbackChains } from "../session/settings";
++import { resolveConfiguredRoleFallbackChain } from "./role-fallbacks";
++export { resolveConfiguredRoleFallbackChain } from "./role-fallbacks";
+ 
+ function isKnownProvider(provider: string): provider is KnownProvider {
+ 	return provider in DEFAULT_MODEL_PER_PROVIDER;
+@@ -1215,13 +1217,12 @@ export function rolePriorityDefaults(role: string): string[] {
+ /** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
+ function resolveNestedRolePatterns(
+ 	value: string | string[],
+-	roleDefaults: string[],
+ 	settings: ModelRoleLookup | undefined,
+ 	visited: Set<string>,
+ ): string[] {
+ 	const resolved: string[] = [];
+ 	for (const pattern of normalizeModelPatternList(value)) {
+-		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
++		const { base: aliasCandidate } = splitThinkingSuffix(
+ 			pattern,
+ 			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+ 			MAX_THINKING_SUFFIX_OPTIONS,
+@@ -1232,12 +1233,7 @@ function resolveNestedRolePatterns(
+ 			continue;
+ 		}
+ 		if (visited.has(aliasRole)) {
+-			resolved.push(
+-				...(thinkingLevel
+-					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
+-					: roleDefaults),
+-			);
+-			continue;
++			throw new Error(`Model role alias cycle: ${[...visited, aliasRole].join(" -> ")}`);
+ 		}
+ 
+ 		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+@@ -1249,12 +1245,11 @@ function resolveNestedRolePatterns(
+ function resolveDefaultInheritedPatterns(
+ 	role: ModelRole,
+ 	configuredDefault: string | undefined,
+-	roleDefaults: string[],
+ 	settings: ModelRoleLookup | undefined,
+ 	visited: Set<string>,
+ ): string[] {
+ 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
+-	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited);
++	return resolveNestedRolePatterns(configuredDefault, settings, visited);
+ }
+ 
+ function resolveConfiguredRolePattern(
+@@ -1272,15 +1267,15 @@ function resolveConfiguredRolePattern(
+ 	);
+ 	const role = getModelRoleAlias(aliasCandidate, settings);
+ 	if (!role) return [normalized];
+-	if (visited.has(role)) return undefined;
++	if (visited.has(role)) throw new Error(`Model role alias cycle: ${[...visited, role].join(" -> ")}`);
+ 	visited.add(role);
+ 
+ 	const configured = settings?.getModelRole(role)?.trim();
+ 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
+ 	// Built-in defaults chain to other roles (judge: `@tiny`, `@smol`, `@default`). Left unexpanded, the
+ 	// matcher reads them as literal ids and `@default` fuzzy-matches Vertex ids like `claude-opus-4-8@default`.
+-	const roleDefaults = isModelRole(role)
+-		? resolveNestedRolePatterns(rolePriorityDefaults(role), [], settings, visited)
++	const roleDefaults = !configured && isModelRole(role)
++		? resolveNestedRolePatterns(rolePriorityDefaults(role), settings, visited)
+ 		: [];
+ 	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
+ 	const fallbackPatterns =
+@@ -1290,11 +1285,11 @@ function resolveConfiguredRolePattern(
+ 			? undefined
+ 			: resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback.role), settings, new Set(visited));
+ 	const resolved = configured
+-		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited)
++		? resolveNestedRolePatterns(configured, settings, visited)
+ 		: fallbackPatterns
+ 			? fallbackPatterns
+ 			: isModelRole(role)
+-				? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
++				? resolveDefaultInheritedPatterns(role, configuredDefault, settings, visited)
+ 				: roleDefaults;
+ 	if (resolved.length === 0) {
+ 		resolved.push(...roleDefaults);
+@@ -1303,7 +1298,9 @@ function resolveConfiguredRolePattern(
+ 		return undefined;
+ 	}
+ 
+-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
++	return thinkingLevel
++		? resolved.map(pattern => `${splitThinkingSuffix(pattern, 0, MAX_THINKING_SUFFIX_OPTIONS).base}:${thinkingLevel}`)
++		: resolved;
+ }
+ 
+ /**
+@@ -1647,15 +1644,19 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
+ 	const configuredRoles = settings.getModelRoles();
+ 	const configured = settings.getModelRole(role)?.trim();
+ 	const primarySelector = configured || formatModelRoleAlias(role);
+-	const configuredFallbacks = cfgRetryFallbackChains.get(settings)[role];
+-	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
+-	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
++	const configuredFallbacks = resolveConfiguredRoleFallbackChain(
++		role,
++		cfgRetryFallbackChains.get(settings),
++		key => settings.getModelRole(key),
++	);
++	const hasConfiguredFallbackChain = configuredFallbacks !== undefined;
++	const fallbackSelectors = configuredFallbacks ?? rolePriorityDefaults(role);
+ 	const selectors = [
+ 		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+ 		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
+ 	];
+ 	const candidates: RoleChainCandidate[] = [];
+-	const candidateByRoute = new Map<string, RoleChainCandidate>();
++	const candidateBySelector = new Map<string, RoleChainCandidate>();
+ 	// First explicitly configured provider-qualified selector that resolved to
+ 	// nothing; the next candidate carries it so callers can say what replaced it.
+ 	let unresolvedExplicit: string | undefined;
+@@ -1671,8 +1672,8 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
+ 			if (qualifiedMiss) unresolvedExplicit ??= qualifiedMiss;
+ 		}
+ 		if (!resolved.model) continue;
+-		const key = formatModelStringWithRouting(resolved.model);
+-		const existing = candidateByRoute.get(key);
++		const key = `${formatModelStringWithRouting(resolved.model)}:${resolved.thinkingLevel ?? ""}`;
++		const existing = candidateBySelector.get(key);
+ 		if (existing) {
+ 			if (explicit) existing.explicit = true;
+ 			continue;
+@@ -1680,7 +1681,7 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
+ 		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
+ 		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
+ 		if (unresolvedExplicit !== undefined && candidates.length === 0) candidate.replaces = unresolvedExplicit;
+-		candidateByRoute.set(key, candidate);
++		candidateBySelector.set(key, candidate);
+ 		candidates.push(candidate);
+ 	}
+ 	return candidates;
+@@ -1771,10 +1772,10 @@ function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: strin
+ }
+ 
+ /**
+- * Resolve a saved session model selector (`provider/id`, optionally with a
+- * thinking suffix) to a registered model whose provider is enabled and has
+- * credentials configured. Startup resume and runtime session switches share
+- * this lookup, so both restore the same models.
++ * Resolve a saved session model selector (`provider/id`, optionally with
++ * `@upstream` routing and a thinking suffix) within its exact provider.
++ * The provider must be enabled and have credentials configured. Startup resume
++ * and runtime session switches share this lookup.
+  *
+  * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
+  * tokens and runs no `!command` keys, which would stall a restore on the network.
+@@ -1785,15 +1786,21 @@ export function resolveSessionModelSelector(
+ ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+ 	const parsed = parseSessionModelSelector(modelRegistry, selector);
+ 	if (!parsed) return undefined;
+-	const model = modelRegistry.find(parsed.provider, parsed.id);
+-	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
++	const { model } = parseModelPattern(
++		`${parsed.provider}/${parsed.id}`,
++		modelRegistry.getProviderModels(parsed.provider),
++		undefined,
++		{ allowInvalidThinkingSelectorFallback: false },
++	);
++	// Retain the registry's enabled-provider check without losing the routed clone.
++	if (!model || !modelRegistry.find(model.provider, model.id) || !modelRegistry.hasConfiguredAuth(model)) return undefined;
+ 	return { model, thinkingLevel: parsed.thinkingLevel };
+ }
+ 
+ /**
+- * Discovery-backed providers (models.yml `discovery:` or extension
+- * `fetchDynamicModels`) that could still supply one of the saved selectors
+- * after a provider-scoped refresh. Disabled providers are skipped.
++ * Discovery-backed providers (built-in, models.yml `discovery:`, or extension
++ * `fetchDynamicModels`) that could still supply one of the saved/startup
++ * selectors after a provider-scoped refresh. Disabled providers are skipped.
+  */
+ export function sessionModelDiscoveryProviders(
+ 	modelRegistry: ModelRegistry,
+diff --git a/src/config/role-fallbacks.ts b/src/config/role-fallbacks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c8db8a99614b2effe7bf53cacbb7e053548dd81
+--- /dev/null
++++ b/src/config/role-fallbacks.ts
+@@ -0,0 +1,23 @@
++import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
++
++/** Resolve only explicitly configured chains, inheriting a pure role alias's full plan. */
++export function resolveConfiguredRoleFallbackChain(
++	role: string,
++	chains: Readonly<Record<string, readonly string[]>>,
++	getModelRole: (role: string) => string | undefined,
++): readonly string[] | undefined {
++	const visited = new Set<string>();
++	let current = role;
++	while (true) {
++		if (visited.has(current)) throw new Error(`Model role alias cycle: ${[...visited, current].join(" -> ")}`);
++		visited.add(current);
++		if (Object.hasOwn(chains, current)) return chains[current];
++		const configured = getModelRole(current)?.trim();
++		if (!configured || configured.includes(",")) return undefined;
++		const { base } = splitThinkingSuffix(configured, configured.startsWith("pi/") ? 3 : 1, MAX_THINKING_SUFFIX_OPTIONS);
++		if (base === "*") current = "default";
++		else if (base.startsWith("@") && base.length > 1) current = base.slice(1);
++		else if (base.startsWith("pi/") && base.length > 3) current = base.slice(3);
++		else return undefined;
++	}
++}
+diff --git a/src/main.ts b/src/main.ts
+index ad2f7258782aa33981c124e0c07c588e86bc52d0..17d546657b89bf143cf669680c281b0cd61fbe21 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -50,7 +50,6 @@ import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
+ import { findConfigFile } from "./config";
+ import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
+ import { ModelRegistry } from "./config/model-registry";
+-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+ import {
+ 	disabledProviderIds,
+ 	expandRoleAlias,
+@@ -1533,10 +1532,6 @@ export async function buildSessionOptions(
+ 	// - supports --model <provider>/<pattern>
+ 	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
+ 	const disabledProviders = disabledProviderIds(activeSettings);
+-	// `--model` rewrites the session's `default` role below. Preserve the
+-	// configured assignment so explicit prewalk role targets still resolve
+-	// against the value that existed when the CLI was invoked.
+-	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
+ 	// True when a configured `default` role was deliberately left unresolved for
+ 	// createAgentSession's post-extension re-resolution (issue #6694); the
+ 	// scoped thinking-level seed below must be deferred along with the model.
+@@ -1550,6 +1545,7 @@ export async function buildSessionOptions(
+ 			settings: activeSettings,
+ 			preferences: modelMatchPreferences,
+ 		});
++		options.modelRole = resolved.configuredRole;
+ 		if (resolved.warning) warn(resolved.warning);
+ 		if (resolved.disabledProvider !== undefined) {
+ 			// Deferring a disabled pin to post-extension resolution would let it
+@@ -1590,19 +1586,12 @@ export async function buildSessionOptions(
+ 			options.model = resolved.model;
+ 			if (resolved.configuredRole) options.modelRole = resolved.configuredRole;
+ 			options.rebindModelAfterDiscovery = true;
+-			// The recorded role must carry the effort the session actually starts
+-			// at, or the first cycle back into `default` overrides it.
+-			activeSettings.overrideModelRoles({
+-				default: formatModelSelectorValue(
+-					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+-					parsed.thinking ?? resolved.thinkingLevel,
+-				),
+-			});
+ 			if (!parsed.thinking && resolved.thinkingLevel) {
+ 				options.thinkingLevel = resolved.thinkingLevel;
+ 			}
+ 		}
+ 	} else if (scopedModels.length > 0 && !restoringSession) {
++		options.modelRole = "default";
+ 		const remembered = activeSettings.getModelRole("default");
+ 		if (remembered) {
+ 			const rememberedSpec = resolveModelRoleValue(
+@@ -1673,23 +1662,12 @@ export async function buildSessionOptions(
+ 			: !restoringSession && cfgPrewalkEnabled.get(activeSettings);
+ 	if (prewalkEnabled) {
+ 		const target = parsed.prewalkInto ?? cfgPrewalkInto.get(activeSettings);
+-		// `--model` mutates only the session default role. Resolve an explicit
+-		// `--prewalk-into` against the pre-mutation default while leaving all
+-		// other role lookups live; the configured `prewalk.into` keeps resolving
+-		// against the live settings.
+-		const roleLookup =
+-			parsed.prewalkInto === undefined
+-				? activeSettings
+-				: {
+-						getModelRole: (role: string) =>
+-							role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
+-					};
+ 
+ 		// Bare `default` is a backwards-compatible special selector handled
+ 		// by expandRoleAlias rather than the prefixed role-alias grammar.
+-		const targetSelector = target.trim() === "default" ? expandRoleAlias(target, roleLookup) : target;
++		const targetSelector = target.trim() === "default" ? expandRoleAlias(target, activeSettings) : target;
+ 		// Keep every role candidate so a later authenticated fallback can still arm prewalk.
+-		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, roleLookup);
++		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, activeSettings);
+ 		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
+ 
+ 		const selection = await resolvePrewalkTarget(
+diff --git a/src/modes/controllers/selector-controller.ts b/src/modes/controllers/selector-controller.ts
+index 0d70a6d34fa37a12fb47c3a04471ad58fe215b87..75645ac9e12085c619bf59c2447a207fb6deaa69 100644
+--- a/src/modes/controllers/selector-controller.ts
++++ b/src/modes/controllers/selector-controller.ts
+@@ -738,12 +738,17 @@ export class SelectorController {
+ 	 * transcript exceeds the target's context window, mirroring an over-context
+ 	 * pick in the alt+p picker. Failures surface as status errors.
+ 	 */
+-	async switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
++	async switchSessionModel(
++		model: Model,
++		thinkingLevel?: ConfiguredThinkingLevel,
++		role?: string,
++		selector = `${model.provider}/${model.id}`,
++	): Promise<void> {
+ 		const contextTokens = this.ctx.viewSession.getContextUsage()?.tokens ?? 0;
+ 		const contextWindow = model.contextWindow ?? 0;
+ 		const overContext = contextWindow > 0 && contextTokens > contextWindow;
+ 		try {
+-			await this.#applySessionModel(model, `${model.provider}/${model.id}`, thinkingLevel, overContext);
++			await this.#applySessionModel(model, selector, thinkingLevel, overContext, role);
+ 		} catch (error) {
+ 			this.ctx.showError(error instanceof Error ? error.message : String(error));
+ 		}
+@@ -765,12 +770,12 @@ export class SelectorController {
+ 		selector: string,
+ 		thinkingLevel: ConfiguredThinkingLevel | undefined,
+ 		compactFirst: boolean,
++		role?: string,
+ 	): Promise<void> {
+ 		const target = this.ctx.viewSession;
+ 		const focusedAgentId = this.ctx.focusedAgentId;
+ 		const apply = async () => {
+-			// Without a slider level, the session's level carries over (clamped to the model).
+-			await target.setModelTemporary(model, thinkingLevel);
++			await target.setModel(model, role, { selector, thinkingLevel });
+ 			this.ctx.statusLine.invalidate();
+ 			this.ctx.updateEditorBorderColor();
+ 			if (focusedAgentId) {
+diff --git a/src/modes/interactive-mode.ts b/src/modes/interactive-mode.ts
+index 5c3125a391bcf3205e4d0d74b064777e33594be4..54214a4641bc176de6da540a1aba2659411ab01b 100644
+--- a/src/modes/interactive-mode.ts
++++ b/src/modes/interactive-mode.ts
+@@ -1977,8 +1977,12 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	#pendingGoalContinuationTurns = 0;
+ 	#previousGoalContinuationActivity: string | undefined;
+ 	#goalSuppressNextContinuation = false;
+-	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+-	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
++	#planModePreviousModelState:
++		| { model: Model; thinkingLevel?: ConfiguredThinkingLevel; selectedRole?: string }
++		| undefined;
++	#pendingModelSwitch:
++		| { model: Model; thinkingLevel?: ConfiguredThinkingLevel; selectedRole?: string; ephemeral?: boolean }
++		| undefined;
+ 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
+ 	#pendingPlanModelSwitch = false;
+ 	#planModeHasEntered = false;
+@@ -5996,6 +6000,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			? {
+ 					model: currentModel,
+ 					thinkingLevel: this.session.configuredThinkingLevel(),
++					selectedRole: this.session.sessionManager.getLastModelChangeRole({ skipEphemeral: true }),
+ 				}
+ 			: undefined;
+ 
+@@ -6048,12 +6053,13 @@ export class InteractiveMode implements InteractiveModeContext {
+ 					this.#pendingModelSwitch = {
+ 						model: transition.model,
+ 						thinkingLevel: transition.thinkingLevel,
++						ephemeral: true,
+ 					};
+ 					this.#pendingPlanModelSwitch = true;
+ 					return;
+ 				}
+ 				try {
+-					await this.session.setModelTemporary(transition.model, transition.thinkingLevel);
++					await this.session.setModelTemporary(transition.model, transition.thinkingLevel, { ephemeral: true });
+ 				} catch (error) {
+ 					this.showWarning(
+ 						`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
+@@ -6070,7 +6076,15 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.#pendingPlanModelSwitch = false;
+ 		if (!pending) return;
+ 		try {
+-			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
++			if (pending.ephemeral) {
++				await this.session.setModelTemporary(pending.model, pending.thinkingLevel, { ephemeral: true });
++			} else {
++				await this.session.setModel(
++					pending.model,
++					pending.selectedRole === "temporary" ? undefined : pending.selectedRole,
++					{ thinkingLevel: pending.thinkingLevel },
++				);
++			}
+ 		} catch (error) {
+ 			this.showWarning(
+ 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
+@@ -6342,19 +6356,22 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
+ 	}
+ 
+-	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
+-		if (modelsAreEqual(this.session.model, prev.model)) {
+-			// Same model — only thinking level may differ. Avoid setModelTemporary()
+-			// which would reset provider-side sessions and break continuity.
+-			this.session.setThinkingLevel(prev.thinkingLevel);
+-		} else if (this.session.isStreaming) {
++	async #restorePlanPreviousModel(prev: {
++		model: Model;
++		thinkingLevel?: ConfiguredThinkingLevel;
++		selectedRole?: string;
++	}): Promise<void> {
++		if (this.session.isStreaming) {
+ 			this.#pendingModelSwitch = {
+ 				model: prev.model,
+ 				thinkingLevel: prev.thinkingLevel,
++				selectedRole: prev.selectedRole,
+ 			};
+ 			this.#pendingPlanModelSwitch = false;
+ 		} else {
+-			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
++			await this.session.setModel(prev.model, prev.selectedRole === "temporary" ? undefined : prev.selectedRole, {
++				thinkingLevel: prev.thinkingLevel,
++			});
+ 		}
+ 	}
+ 
+@@ -6414,6 +6431,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			? {
+ 					model: this.session.model,
+ 					thinkingLevel: this.session.configuredThinkingLevel(),
++					selectedRole: this.session.sessionManager.getLastModelChangeRole({ skipEphemeral: true }),
+ 				}
+ 			: undefined;
+ 		this.session.setPlanModeState(undefined);
+@@ -6442,7 +6460,9 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			if (
+ 				planModeModelState &&
+ 				(!modelsAreEqual(this.session.model, planModeModelState.model) ||
+-					this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel)
++					this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel ||
++					this.session.sessionManager.getLastModelChangeRole({ skipEphemeral: true }) !==
++						planModeModelState.selectedRole)
+ 			) {
+ 				try {
+ 					await this.#restorePlanPreviousModel(planModeModelState);
+@@ -8243,8 +8263,8 @@ export class InteractiveMode implements InteractiveModeContext {
+ 				// that singleton would silently switch the session back to the plan
+ 				// model after #exitPlanMode restored the pre-plan model.
+ 				// Treat the choice as implicit only when applying the selected role
+-				// would land on the same end state as the restore — same model AND
+-				// the same effective thinking level. A role with an explicit thinking
++				// would land on the same end state as the restore — same model, role,
++				// and effective thinking level. A role with an explicit thinking
+ 				// suffix that differs from the restored thinking level must still go
+ 				// through applyRoleModel, otherwise approving on the same model with a
+ 				// different configured thinking level silently keeps the pre-plan level.
+@@ -8253,6 +8273,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 					cycle && restoredState
+ 						? cycle.models.findIndex(entry => {
+ 								if (!modelsAreEqual(entry.model, restoredState.model)) return false;
++								if (entry.role !== restoredState.selectedRole) return false;
+ 								if (!entry.explicitThinkingLevel) return true;
+ 								return entry.thinkingLevel === restoredState.thinkingLevel;
+ 							})
+@@ -9865,8 +9886,13 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.#selectorController.showModelSelector(options);
+ 	}
+ 
+-	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
+-		return this.#selectorController.switchSessionModel(model, thinkingLevel);
++	switchSessionModel(
++		model: Model,
++		thinkingLevel?: ConfiguredThinkingLevel,
++		role?: string,
++		selector?: string,
++	): Promise<void> {
++		return this.#selectorController.switchSessionModel(model, thinkingLevel, role, selector);
+ 	}
+ 
+ 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void> {
+diff --git a/src/modes/types.ts b/src/modes/types.ts
+index a73be001d375f65fe3ae419501fbd047ef9fa65e..89a97114b1453211b84d2aeca2131cb93c4ef4bb 100644
+--- a/src/modes/types.ts
++++ b/src/modes/types.ts
+@@ -654,7 +654,7 @@ export interface InteractiveModeContext {
+ 	showGitUi(revision?: string): void;
+ 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+ 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
+-	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
++	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel, role?: string, selector?: string): Promise<void>;
+ 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
+ 	showUserMessageSelector(startAt?: string): void;
+ 	showCopySelector(): void;
+diff --git a/src/sdk.ts b/src/sdk.ts
+index b75e12b40e2076bfbc42513867573d6bd03a558e..ec2e06676299daa8d4275ff117a6df08019a0589 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -78,6 +78,7 @@ import {
+ 	getModelMatchPreferences,
+ 	type ModelMatchPreferences,
+ 	parseModelPattern,
++	type ParsedModelResult,
+ 	pickDefaultAvailableModel,
+ 	providerModelHint,
+ 	resolveAllowedModels,
+@@ -88,6 +89,7 @@ import {
+ 	resolveSessionModelSelector,
+ 	sessionModelDiscoveryProviders,
+ } from "./config/model-resolver";
++import { formatModelRoleAlias } from "./config/model-roles";
+ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
+ import { buildServiceTierByFamily } from "./config/service-tier";
+@@ -250,8 +252,9 @@ import {
+ 	dropUnreadableContextImages,
+ } from "./session/provider-image-budget";
+ import {
+-	expandDefaultRetryFallbackChains,
++	getRetryFallbackChains,
+ 	findRetryFallbackCandidates,
++	getRetryFallbackRole,
+ 	installRetryFallbackRole,
+ 	type RetryFallbackResolutionContext,
+ 	resolveRetryFallbackChainKey,
+@@ -421,7 +424,6 @@ import {
+ 	cfgProvidersCacheWarmingCompactTokens,
+ 	cfgProvidersCacheWarmingStrategy,
+ 	cfgProvidersKimiApiFormat,
+-	cfgRetryFallbackChains,
+ 	cfgRetryModelFallback,
+ 	cfgRetryUsageAwareFallback,
+ 	cfgRetryUsageReservePct,
+@@ -670,7 +672,7 @@ export interface CreateAgentSessionOptions {
+ 
+ 	/** Model to use. Default: from settings, else first available */
+ 	model?: Model;
+-	/** Role whose alias selected {@link model} (CLI `--model pi/<role>`); retries walk that role's fallback chain. */
++	/** Explicit role owning this model's closed retry plan; concrete selections omit it. */
+ 	modelRole?: string;
+ 	/**
+ 	 * Allow an explicit {@link model} to be rebound to its same-selector registry
+@@ -2286,15 +2288,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			: providerPromptCacheKey !== undefined
+ 				? "fork"
+ 				: undefined;
+-	// Startup model *selection* only needs to know whether auth is configured for
+-	// a candidate's provider — never the resolved key bytes. Use the synchronous,
+-	// side-effect-free probe (`hasConfiguredAuth`): it refreshes no OAuth tokens,
+-	// executes no `!command` keys, and issues no auth-broker requests. Resolving the
+-	// real key here (`getApiKey`) blocks resume on those network paths — a slow or
+-	// unreachable OAuth/broker endpoint stalls startup for the full ~10s refresh
+-	// timeout per candidate (observed as a hang in `restoreSessionModel`). The real
+-	// key is resolved lazily per request via ModelRegistry.resolver.
+-	const hasModelAuth = (candidate: Model): boolean => modelRegistry.hasConfiguredAuth(candidate);
++	// Catalog filtering stays side-effect free. Role startup additionally checks
++	// usable credentials in plan order, honoring the SDK's custom resolver too.
++	const hasModelAuth = (candidate: Model): boolean =>
++		options.getApiKey !== undefined || modelRegistry.hasConfiguredAuth(candidate);
++	const getStartupApiKey = async (candidate: Model) => {
++		try {
++			return options.getApiKey
++				? await resolveApiKeyOnce(await options.getApiKey(candidate))
++				: await modelRegistry.getApiKey(candidate, providerSessionId);
++		} catch {
++			// An unusable credential advances only within the selected startup plan.
++			return undefined;
++		}
++	};
+ 
+ 	// Load and create secret obfuscator early so resumed session state and prompt warnings
+ 	// reflect actual loaded secrets, not just the setting toggle. Reassigned when
+@@ -2327,6 +2334,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			? [options.modelPattern.trim()]
+ 			: [];
+ 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
++	// A committed role owns its saved closed plan even after its extension lease ends.
++	const selectedModelChange = existingSession.selectedModelChange;
++	if (selectedModelChange?.retryFallback && selectedModelChange.role &&
++		(!hasExplicitModel || options.modelRole === selectedModelChange.role)) {
++		installRetryFallbackRole(settings, selectedModelChange.role, selectedModelChange.retryFallback);
++	}
+ 	const modelMatchPreferences = getModelMatchPreferences(settings);
+ 	const defaultRoleValue = settings.getModelRole("default");
+ 	let explicitDefaultProviders: Set<string> | undefined;
+@@ -2364,7 +2377,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 	let model = options.model;
+ 	let modelFallbackMessage: string | undefined;
+ 	let initialRetryFallback: InitialRetryFallbackState | undefined;
+-	let modelPatternRetryFallbackRole: string | undefined;
++	let installedModelRole =
++		options.modelRole ??
++		(hasExplicitModel ? "temporary" : sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default");
+ 	// Identify session model strings to restore in fallback order. We do an
+ 	// initial pass here so model-dependent setup (thinking-level resolution,
+ 	// host preconnect) can use the restored model; extension-registered
+@@ -2372,10 +2387,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 	// extensions register below.
+ 	const sessionModelStrings =
+ 		!hasExplicitModel && hasExistingSession
+-			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
++			? selectedModelChange?.retryFallback
++				? [selectedModelChange.retryFallback.primary]
++				: getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole({ skipEphemeral: true }))
+ 			: [];
+ 	let restoredSessionModelIndex = -1;
+ 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
++	let startupCandidateThinkingLevel: ConfiguredThinkingLevel | undefined;
+ 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
+ 		logger.time("restoreSessionModel", () => {
+ 			let failedSessionModel: string | undefined;
+@@ -2398,7 +2416,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 
+ 	// If still no model, try settings default.
+ 	// Skip settings fallback when an explicit model was requested.
+-	if (!hasExplicitModel && !model && defaultRoleSpec.model) {
++	if (!hasExplicitModel && !model && defaultRoleSpec.model && installedModelRole === "default") {
+ 		const settingsDefaultModel = defaultRoleSpec.model;
+ 		logger.time("resolveSettingsDefaultModel", () => {
+ 			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
+@@ -2418,7 +2436,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 	// so the final model's own defaults aren't masked by an earlier fallback
+ 	// model's.
+ 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
+-		let level = options.thinkingLevel;
++		let level = startupCandidateThinkingLevel ?? options.thinkingLevel;
+ 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
+ 			level =
+ 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
+@@ -2429,7 +2447,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		}
+ 		if (level !== undefined) return level;
+ 		const roleLevel =
+-			!hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel
++			!hasExplicitModel && installedModelRole === "default" && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel
+ 				? defaultRoleSpec.thinkingLevel
+ 				: undefined;
+ 		return newSessionThinkingLevel(
+@@ -3371,10 +3389,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		if (
+ 			sessionModelStrings.length > 0 &&
+ 			restoredSessionModelIndex < 0 &&
+-			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
++			settings.getModelRole(installedModelRole) === undefined &&
++			(installedModelRole !== "default" || !options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
+ 		) {
+ 			throw new SessionModelRestoreError(sessionModelStrings[0]);
+ 		}
++		// A selected role owns startup auth recovery too. Retry its own selectors,
++		// never a parent model or an unrelated default/first-available model.
++		if (installedModelRole !== "temporary" && (options.modelRole || !hasExplicitModel)) {
++			if (model) {
++				const apiKey = await getStartupApiKey(model);
++				if (apiKey !== kNoAuth && !isAuthenticated(apiKey)) model = undefined;
++			}
++			if (!model && settings.getModelRole(installedModelRole) !== undefined && !options.modelPatternFallbackRole) {
++				deferredModelPatterns.splice(0, deferredModelPatterns.length, formatModelRoleAlias(installedModelRole));
++			}
++		}
+ 		// Resolve deferred --model/subagent patterns now that extension models are
+ 		// registered. Use the same CLI resolver as the immediate path so bare role
+ 		// names, exact model names, and provider selectors keep one precedence rule.
+@@ -3383,34 +3413,41 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			// extension catalogs remain on the post-first-frame background path.
+ 			const matchPreferences = getModelMatchPreferences(settings);
+ 			const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+-			const runtimeResolved = deferredModelPatterns.some(pattern =>
+-				pattern.split(",").some(selector => {
+-					const trimmedSelector = selector.trim();
+-					if (!trimmedSelector) return false;
+-					const resolved = resolveCliModel({
+-						cliModel: trimmedSelector,
+-						modelRegistry,
+-						settings,
+-						preferences: matchPreferences,
+-					});
+-					// Only a concretely resolved model counts as a runtime match. A role
+-					// alias that expanded to `configuredPatterns` but resolved no model
+-					// (its discoverable provider hasn't been fetched yet) must NOT
+-					// short-circuit the fallback refresh below — otherwise `@role`
+-					// selectors pointing at discovery-backed models never trigger the
+-					// fetch and fail with `Model "@role" not found`. A disabled provider
+-					// is unreachable, so a match on one likewise must not count: otherwise
+-					// a disabled first selector suppresses the discovery refresh an enabled
+-					// later selector still needs.
+-					return resolved.model !== undefined && !disabledProviders.has(resolved.model.provider);
++			const deferredSelectors = deferredModelPatterns.flatMap(pattern =>
++				pattern.split(",").map(selector => selector.trim()).filter(Boolean),
++			);
++			const startupPatterns = deferredSelectors.flatMap(selector =>
++				resolveCliModel({ cliModel: selector, modelRegistry, settings, preferences: matchPreferences })
++					.configuredPatterns ?? [selector],
++			);
++			const primaryResolved = await logger.time("resolveModelDiscoveryDeferredRetry", () =>
++				resolveStartupModelWithDiscovery(modelRegistry, startupPatterns, settings, async () => {
++					let offset = 0;
++					for (const selector of deferredSelectors) {
++						const resolved = resolveCliModel({
++							cliModel: selector,
++							modelRegistry,
++							settings,
++							preferences: matchPreferences,
++						});
++						if (resolved.model && !disabledProviders.has(resolved.model.provider) && hasModelAuth(resolved.model)) {
++							const apiKey = await getStartupApiKey(resolved.model);
++							if (apiKey === kNoAuth || isAuthenticated(apiKey)) {
++								return offset + (resolved.configuredPatternIndex ?? 0);
++							}
++						}
++						offset += resolved.configuredPatterns?.length ?? 1;
++					}
++					return undefined;
+ 				}),
+ 			);
+ 			let allEnabledModels =
+ 				disabledProviders.size === 0
+ 					? modelRegistry.getAll()
+ 					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
+-			const availableModels =
+-				disabledProviders.size === 0
++			let availableModels = options.getApiKey
++				? allEnabledModels
++				: disabledProviders.size === 0
+ 					? modelRegistry.getAvailable()
+ 					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
+ 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
+@@ -3427,18 +3464,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 						const primaryPatterns: Array<{
+ 							pattern: string;
+ 							retryFallback: InitialRetryFallbackState | undefined;
++							configuredRole: string | undefined;
+ 						}> = resolved.configuredPatterns.map(pattern => ({
+ 							pattern,
+ 							retryFallback: undefined,
++							configuredRole: options.modelRole ?? resolved.configuredRole,
+ 						}));
+ 						if (!resolved.configuredRole || !cfgRetryModelFallback.get(settings)) {
+ 							return primaryPatterns;
+ 						}
+ 						const fallbackContext: RetryFallbackResolutionContext = {
+-							chains: expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
+-								...Object.keys(settings.getModelRoles()),
+-								resolved.configuredRole,
+-							]),
++							chains: getRetryFallbackChains(settings),
+ 							getModelRole: role => settings.getModelRole(role),
+ 							modelLookup: modelRegistry,
+ 						};
+@@ -3468,7 +3504,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 							...primaryPatterns,
+ 							...findRetryFallbackCandidates(fallbackContext, chainKey, originalSelector, originalModel, {
+ 								allowMissingPrimary: true,
+-							}).map(candidate => ({ pattern: candidate.raw, retryFallback })),
++							}).map(candidate => ({
++								pattern: candidate.raw,
++								retryFallback,
++								configuredRole: options.modelRole ?? resolved.configuredRole,
++							})),
+ 						];
+ 					}
+ 					if (resolved.model) {
+@@ -3479,26 +3519,60 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 									resolved.thinkingLevel,
+ 								),
+ 								retryFallback: undefined,
++								configuredRole: options.modelRole ?? resolved.configuredRole,
+ 							},
+ 						];
+ 					}
+ 					return resolveConfiguredModelPatterns([trimmedSelector], settings).map(pattern => ({
+ 						pattern,
+ 						retryFallback: undefined,
++						configuredRole: options.modelRole ?? resolved.configuredRole,
+ 					}));
+ 				}),
+ 			);
++			if (!primaryResolved) {
++				const fallbackPatterns = expandedModelPatterns.filter(entry => entry.retryFallback).map(entry => entry.pattern);
++				await logger.time("resolveModelDiscoveryRetryFallback", () =>
++					resolveStartupModelWithDiscovery(modelRegistry, fallbackPatterns, settings, async () => {
++						const available = modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
++						const all = modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
++						const pool = !options.getApiKey && fallbackPatterns.some(pattern => parseModelPattern(pattern, available, matchPreferences).model)
++							? available
++							: all;
++						for (let index = 0; index < fallbackPatterns.length; index++) {
++							const candidate = parseModelPattern(fallbackPatterns[index], pool, matchPreferences).model;
++							if (!candidate || !hasModelAuth(candidate)) continue;
++							const apiKey = await getStartupApiKey(candidate);
++							if (apiKey === kNoAuth || isAuthenticated(apiKey)) return index;
++						}
++						return undefined;
++					}),
++				);
++				allEnabledModels = modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
++				availableModels = options.getApiKey ? allEnabledModels : modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
++			}
+ 			const resolutionModels = expandedModelPatterns.some(
+ 				({ pattern }) => parseModelPattern(pattern, availableModels, matchPreferences).model,
+ 			)
+ 				? availableModels
+ 				: allEnabledModels;
++			const rolePrimaryThinkingLevel = expandedModelPatterns[0]
++				? parseModelString(expandedModelPatterns[0].pattern, {
++						allowMaxSuffix: true,
++						allowAutoAlias: true,
++						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
++					})?.thinkingLevel
++				: undefined;
+ 			let usageFallbackTriggered = false;
+ 			let usageFallbackReason: { from: string; reason: string } | undefined;
+ 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
+-				const { pattern, retryFallback } = expandedModelPatterns[patternIndex];
++				const { pattern, retryFallback, configuredRole } = expandedModelPatterns[patternIndex];
+ 				const primary = parseModelPattern(pattern, resolutionModels, matchPreferences);
+-				if (!primary.model || (retryFallback && !hasModelAuth(primary.model))) continue;
++				if (!primary.model || ((retryFallback || configuredRole) && !hasModelAuth(primary.model))) continue;
++				if (configuredRole) {
++					const apiKey = await getStartupApiKey(primary.model);
++					if (apiKey !== kNoAuth && !isAuthenticated(apiKey)) continue;
++				}
+ 				let hasUsageFallbackCandidate = false;
+ 				for (
+ 					let candidateIndex = patternIndex + 1;
+@@ -3582,12 +3656,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				// A chain entry without its own `:level` suffix inherits the
+ 				// unavailable primary's configured thinking level, matching
+ 				// runtime fallback-chain semantics.
+-				if (retryFallback && !selectedExplicitThinkingLevel && retryFallback.originalThinkingLevel !== undefined) {
+-					selectedThinkingLevel = retryFallback.originalThinkingLevel;
++				const inheritedThinkingLevel = retryFallback?.originalThinkingLevel ??
++					(configuredRole && configuredRole === expandedModelPatterns[0]?.configuredRole
++						? rolePrimaryThinkingLevel
++						: undefined);
++				if (!selectedExplicitThinkingLevel && inheritedThinkingLevel !== undefined) {
++					selectedThinkingLevel = inheritedThinkingLevel;
+ 					selectedExplicitThinkingLevel = true;
+ 				}
+ 				let authFallbackUsed = false;
+-				if (options.modelPatternParentFallback) {
++				if (!configuredRole && !options.modelRole && options.modelPatternParentFallback) {
+ 					const primaryKey = await modelRegistry.getApiKey(primary.model);
+ 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
+ 						const fallback = parseModelPattern(
+@@ -3609,42 +3687,42 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				if (!authFallbackUsed && options.modelPatternFallbackRole) {
+ 					const primarySelector = formatModelSelectorValue(
+ 						formatModelStringWithRouting(primary.model),
+-						primary.thinkingLevel,
++						selectedThinkingLevel,
+ 					);
+ 					const seenSelectors = new Set<string>([primarySelector]);
+ 					const fallbackSelectors: string[] = [];
+ 					for (const fallbackEntry of expandedModelPatterns.slice(patternIndex + 1)) {
+ 						const fallback = parseModelPattern(fallbackEntry.pattern, resolutionModels, matchPreferences);
+-						if (!fallback.model) continue;
+ 						const fallbackSelector = formatModelSelectorValue(
+-							formatModelStringWithRouting(fallback.model),
+-							fallback.thinkingLevel,
++							fallback.model ? formatModelStringWithRouting(fallback.model) : fallbackEntry.pattern,
++							fallback.explicitThinkingLevel ? fallback.thinkingLevel : selectedThinkingLevel,
+ 						);
+ 						if (seenSelectors.has(fallbackSelector)) continue;
+ 						seenSelectors.add(fallbackSelector);
+ 						fallbackSelectors.push(fallbackSelector);
+ 					}
+-					if (fallbackSelectors.length === 0) {
++					if (!configuredRole && !options.modelRole && fallbackSelectors.length === 0) {
+ 						for (const selector of options.modelPatternDefaultFallbackChain ?? []) {
+ 							if (typeof selector !== "string" || seenSelectors.has(selector)) continue;
+ 							seenSelectors.add(selector);
+ 							fallbackSelectors.push(selector);
+ 						}
+ 					}
+-					if (fallbackSelectors.length > 0 || options.modelPatternDefaultFallbackChain?.length === 0) {
+-						installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
+-							primary: primarySelector,
+-							chain: fallbackSelectors,
+-						});
+-						modelPatternRetryFallbackRole = options.modelPatternFallbackRole;
+-					}
++					installRetryFallbackRole(settings, options.modelPatternFallbackRole, {
++						primary: primarySelector,
++						chain: fallbackSelectors,
++					});
++					installedModelRole = options.modelPatternFallbackRole;
+ 				}
+ 				model = selectedModel;
+-				initialRetryFallback =
+-					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
++				if (!options.modelPatternFallbackRole && configuredRole) installedModelRole = configuredRole;
++				initialRetryFallback = options.modelPatternFallbackRole
++					? undefined
++					: retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
+ 				modelFallbackMessage = undefined;
+ 				if (selectedExplicitThinkingLevel) {
+ 					restoredSessionThinkingLevel = selectedThinkingLevel;
++					startupCandidateThinkingLevel = selectedThinkingLevel;
+ 				}
+ 				adoptThinkingForModel(selectedModel);
+ 				if (usageFallbackReason) {
+@@ -3667,6 +3745,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				const hint =
+ 					deferredModelPatterns.length === 1 ? providerModelHint(deferredModelPatterns[0], allEnabledModels) : "";
+ 				modelFallbackMessage = `Model ${requested} not found${hint ? `.${hint}` : ""}`;
++				const exhaustedRole = options.modelRole ?? expandedModelPatterns.find(entry => entry.configuredRole)?.configuredRole;
++				if (exhaustedRole) throw new Error(`No model with usable credentials in role '${exhaustedRole}'.`);
+ 				// A subagent whose own patterns match nothing runs on its parent's model
+ 				// rather than starting with none; the message names the substitution.
+ 				const parentFallback = options.modelPatternParentFallback
+@@ -3681,6 +3761,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				}
+ 			}
+ 		}
++		if (!model && deferredModelPatterns.length === 0 && installedModelRole !== "default" && installedModelRole !== "temporary") {
++			throw new Error(`No model with usable credentials in role '${installedModelRole}'.`);
++		}
+ 
+ 		// Fall back to first available model with a valid API key, honoring the
+ 		// path-scoped `enabledModels` allow-list when configured. Skip when the
+@@ -3719,13 +3802,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				return true;
+ 			};
+ 
+-			const tryResolveDefaultRoleFallback = (fallbackCandidates: Model[]): boolean => {
++			const tryResolveDefaultRoleFallback = async (): Promise<boolean> => {
+ 				const originalSelector = settings.getModelRole("default");
+ 				if (hasExplicitModel || !originalSelector || !cfgRetryModelFallback.get(settings)) return false;
+-				const chains = expandDefaultRetryFallbackChains(cfgRetryFallbackChains.get(settings), [
+-					...Object.keys(settings.getModelRoles()),
+-					"default",
+-				]);
++				const chains = getRetryFallbackChains(settings);
+ 				// Candidates come only from configured chain entries. Without one,
+ 				// bail before any catalog lookup so the first-paint path never
+ 				// composes the full catalog.
+@@ -3757,7 +3837,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					originalSelector,
+ 					originalThinkingLevel: parsedOriginal?.thinkingLevel,
+ 				};
+-				// `fallbackCandidates` is the default-availability pool, which ignores
++				// The default-availability pool ignores
+ 				// cross-provider env aliases (`xai-oauth` borrowing `XAI_API_KEY`).
+ 				// An explicit chain entry is bound only by the `enabledModels` scope,
+ 				// so outside one it resolves from its provider's catalog and
+@@ -3771,20 +3851,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					originalModel,
+ 					{ allowMissingPrimary: true },
+ 				)) {
+-					let resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
+-					if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
+-						resolved = parseModelPattern(
+-							candidate.raw,
+-							modelRegistry.getProviderModels(candidate.provider),
+-							modelMatchPreferences,
+-						);
+-					}
+-					if (!resolved.model || !hasModelAuth(resolved.model)) continue;
++					let resolved: ParsedModelResult | undefined;
++					await logger.time("resolveDefaultRoleRetryFallbackDiscovery", () =>
++						resolveStartupModelWithDiscovery(modelRegistry, [candidate.raw], settings, async () => {
++							const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
++							resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
++							if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
++								resolved = parseModelPattern(
++									candidate.raw,
++									modelRegistry.getProviderModels(candidate.provider),
++									modelMatchPreferences,
++								);
++							}
++							return resolved.model && hasModelAuth(resolved.model) ? 0 : undefined;
++						}),
++					);
++					if (!resolved?.model || !hasModelAuth(resolved.model)) continue;
+ 					model = resolved.model;
+ 					initialRetryFallback = retryFallback;
+ 					modelFallbackMessage = undefined;
+ 					if (resolved.explicitThinkingLevel) {
+ 						restoredSessionThinkingLevel = resolved.thinkingLevel;
++						startupCandidateThinkingLevel = resolved.thinkingLevel;
+ 					} else if (retryFallback.originalThinkingLevel !== undefined) {
+ 						restoredSessionThinkingLevel = retryFallback.originalThinkingLevel;
+ 					}
+@@ -3795,7 +3883,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 				return false;
+ 			};
+ 
+-			await tryResolveDefaultRole();
++			const configuredDefaultRole = settings.getModelRole("default");
++			await logger.time("resolveModelDiscoveryFallback", () =>
++				resolveStartupModelWithDiscovery(
++					modelRegistry,
++					!hasExplicitModel && configuredDefaultRole ? [configuredDefaultRole] : [],
++					settings,
++					async () => (await tryResolveDefaultRole()) ? defaultRoleSpec.matchedPatternIndex : undefined,
++				),
++			);
+ 
+ 			if (!model) {
+ 				let fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+@@ -3803,18 +3899,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					modelRegistry.hasConcreteAuth(provider),
+ 				);
+ 
+-				// Cold-cache discovery race (issues #6114, #6162): a discovery
+-				// provider (models.yml openai-models-list, LM Studio/Ollama/
+-				// llama.cpp, or an openai-compat proxy) ships no static models, so
+-				// the static+cached catalog resolved nothing above. Background
+-				// discovery in main.ts fires only AFTER createAgentSession returns,
+-				// so on a cache-cold boot the configured default stays unresolved.
+-				// Await one cache-aware discovery pass before choosing either its
+-				// configured retry fallback or an unrelated provider default.
+-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
++				// Without a configured selector there is no provider boundary to
++				// infer. Preserve first-available discovery only when nothing is
++				// available; configured selectors were already retried above.
+ 				if (
+ 					!hasExplicitModel &&
+-					(defaultRoleConfigured || !pick) &&
++					!configuredDefaultRole &&
++					!pick &&
+ 					modelRegistry.getDiscoverableProviders().length > 0
+ 				) {
+ 					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
+@@ -3826,7 +3917,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					}
+ 				}
+ 
+-				if (!model && !tryResolveDefaultRoleFallback(fallbackCandidates) && pick) {
++				if (!model && !(await tryResolveDefaultRoleFallback()) && pick) {
+ 					model = pick;
+ 					adoptThinkingForModel(pick);
+ 					// A configured default that no longer resolves (a renamed or retired
+@@ -5266,13 +5357,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 
+ 		cursorEventEmitter = event => agent.emitExternalEvent(event);
+ 
+-		// The retry role follows the explicit default entry, as the task executor records it,
+-		// so chain lookup prefers the role's chain while resume still restores this model as the default.
+-		const retryRole = options.modelRole ?? modelPatternRetryFallbackRole;
+-		const recordInitialModelChange = (initialModel: string) => {
+-			sessionManager.appendModelChange(initialModel);
+-			if (retryRole && retryRole !== "default") sessionManager.appendModelChange(initialModel, retryRole);
+-		};
+ 
+ 		// Restore messages if session has existing data
+ 		if (hasExistingSession) {
+@@ -5290,17 +5374,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 							obfuscator,
+ 						);
+ 			agent.replaceMessages(restored.messages);
+-			// Only an explicit role alias re-owns a resumed branch; any other explicit model
+-			// (subagent revival, SDK callers) keeps the role its history recorded.
+-			if (model && options.modelRole) recordInitialModelChange(`${model.provider}/${model.id}`);
+ 			if (persistInitialServiceTier) {
+ 				sessionManager.appendServiceTierChange(
+ 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+ 				);
+ 			}
++			if (model && hasExplicitModel) {
++				sessionManager.appendModelChange(formatModelStringWithRouting(model), installedModelRole, false,
++					getRetryFallbackRole(settings, installedModelRole));
++			}
+ 		} else {
+ 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
+-			if (model) recordInitialModelChange(`${model.provider}/${model.id}`);
++			if (model) {
++				sessionManager.appendModelChange(formatModelStringWithRouting(model), installedModelRole, false,
++					getRetryFallbackRole(settings, installedModelRole));
++			}
+ 			if (!autoThinking) {
+ 				// Do not write the `auto` selector before the first turn resolves; auto
+ 				// classification persists its concrete effort once a real user turn runs.
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index 482039cdc6f7a6081bec6fc387c0eeb92f330938..6c314cf60ef9e0678b8f9ba076c59069c7c3d89b 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -135,12 +135,15 @@ import type { EffectiveExtensionRoots } from "../capability/types";
+ import type { SessionAccountPoolScope } from "../config/account-pools";
+ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+ import { cfgOffline } from "../config/auxiliary-model-policy";
+-import type { ModelRegistry } from "../config/model-registry";
++import { isAuthenticated, kNoAuth, type ModelRegistry } from "../config/model-registry";
+ import {
+ 	disabledProviderIds,
++	formatModelStringWithRouting,
++	resolveConfiguredModelPatterns,
+ 	getModelMatchPreferences,
+ 	type ResolvedModelRoleValue,
+ 	resolveCliModel,
++	resolveRoleSelection,
+ 	resolveSessionModelSelector,
+ 	sessionModelDiscoveryProviders,
+ } from "../config/model-resolver";
+@@ -249,6 +252,7 @@ import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+ import { toolReadsSkillUris } from "../system-prompt";
+ import {
+ 	AUTO_THINKING,
++	concreteThinkingLevel,
+ 	type ConfiguredThinkingLevel,
+ 	parseConfiguredThinkingLevel,
+ 	shouldDisableReasoning,
+@@ -473,7 +477,7 @@ import {
+ 	toRestoredQueuedMessage,
+ } from "./queued-messages";
+ import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
+-import type { ServingModel } from "./retry-fallback-chains";
++import { getRetryFallbackChains, installRetryFallbackRole, type ServingModel } from "./retry-fallback-chains";
+ import {
+ 	type AdvisorCatchupOptions,
+ 	type AdvisorStats,
+@@ -8859,6 +8863,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		return this.#models.resolveRoleModelWithThinking(role);
+ 	}
+ 
++
+ 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
+ 		return this.#promptTemplates;
+ 	}
+@@ -12916,6 +12921,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		this.#assertVibeSessionTransitionAllowed("start a new session");
+ 		const previousSessionFile = this.sessionFile;
++		const selectedRole = this.sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default";
++		const selectedEntry = this.sessionManager.getBranch().findLast(entry =>
++			entry.type === "model_change" && (entry.role ?? "default") === selectedRole);
++		const selectedPlan = selectedEntry?.type === "model_change" ? selectedEntry.retryFallback : undefined;
+ 
+ 		// Emit session_before_switch event with reason "new" (can be cancelled)
+ 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+@@ -13001,6 +13010,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			this.#queuedMessageDrainBlocked = false;
+ 			this.#usagePreflightReadyForNextModelCall = false;
+ 
++			this.#recovery.clearActiveRetryFallback();
++			if (this.model) {
++				this.sessionManager.appendModelChange(formatModelStringWithRouting(this.model), selectedRole, false, selectedPlan);
++			}
+ 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
+ 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
+ 
+@@ -13231,10 +13244,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 */
+ 	async setModel(
+ 		model: Model,
+-		role: string = "default",
++		role?: string,
+ 		options?: {
+ 			selector?: string;
+-			thinkingLevel?: ThinkingLevel;
++			thinkingLevel?: ConfiguredThinkingLevel;
+ 			persist?: boolean;
+ 		},
+ 	): Promise<{ switched: boolean }> {
+@@ -14732,7 +14745,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			preserveLocalCwd?: boolean;
+ 			/**
+ 			 * Use this model instead of the target's saved one, like an explicit
+-			 * `--model` at startup, and record it in the session when it differs.
++			 * `--model` at startup, recording concrete selection even for the same model.
+ 			 */
+ 			model?: Model;
+ 			/** Keep the current model without restoring the target's (collab replicas mirror the host's model). */
+@@ -14885,18 +14898,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			let sessionContext = this.buildDisplaySessionContext();
+ 			// Resolve the target's model before announcing the switch, so an
+ 			// unrestorable one rolls back before any hook sees the target session.
+-			const targetModelStrings = getRestorableSessionModels(
+-				sessionContext.models,
+-				this.sessionManager.getLastModelChangeRole(),
+-			);
++			const selectedRole = this.sessionManager.getLastModelChangeRole({ skipEphemeral: true });
++			const selectedPlan = sessionContext.selectedModelChange?.retryFallback;
++			const targetModelStrings = selectedPlan
++				? [selectedPlan.primary]
++				: getRestorableSessionModels(sessionContext.models, selectedRole);
++			if (selectedRole && selectedRole !== "temporary" && cfgRetryModelFallback.get(this.settings)) {
++				for (const selector of selectedPlan?.chain ?? getRetryFallbackChains(this.settings)[selectedRole] ?? []) {
++					targetModelStrings.push(...resolveConfiguredModelPatterns(selector, this.settings));
++				}
++			}
+ 			let targetModel = explicitModel;
++			let restoredFallbackThinking: ConfiguredThinkingLevel | undefined;
+ 			let modelFallbackWarning: string | undefined;
+ 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
+-				targetModel = await this.#resolveSessionModel(targetModelStrings);
+-				if (!targetModel && switchingToDifferentSession) {
+-					// Like startup resume: never hand the transcript to a model the
+-					// session did not choose unless a UI can say so.
+-					if (!this.#allowSessionModelFallback || !cfgRetryModelFallback.get(this.settings)) {
++				const restored = await this.#resolveSessionModel(targetModelStrings);
++				targetModel = restored?.model;
++				if (restored && restored.selector !== targetModelStrings[0]) {
++					restoredFallbackThinking = restored.thinkingLevel;
++				}
++				if (!targetModel && (switchingToDifferentSession || (selectedRole && selectedRole !== "temporary"))) {
++					// A closed role never borrows the departing session's model.
++					if ((selectedRole && selectedRole !== "temporary") || !this.#allowSessionModelFallback || !cfgRetryModelFallback.get(this.settings)) {
+ 						throw new Error(`Could not restore model ${targetModelStrings[0]}`);
+ 					}
+ 					const currentModel = this.model;
+@@ -14936,7 +14959,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				});
+ 			}
+ 
+-			// Persisted once the switch can no longer roll back, below.
++			if (!explicitModel && !options?.keepModel && selectedRole && selectedPlan) {
++				installRetryFallbackRole(this.settings, selectedRole, selectedPlan);
++			}
+ 			this.agent.replaceMessages(sessionContext.messages);
+ 			this.#reseedTokenRate();
+ 			this.#advisors.resetSessionState({ preserveCost: true });
+@@ -14961,13 +14986,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				} else {
+ 					this.agent.setModel(targetModel);
+ 				}
+-				// Saved selectors may carry a thinking suffix; compare resolved models.
+-				const savedModel =
+-					targetModelStrings.length > 0
+-						? resolveSessionModelSelector(this.#modelRegistry, targetModelStrings[0])?.model
+-						: undefined;
+-				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
+-					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
++				if (explicitModel) {
++					this.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel), "temporary");
+ 				}
+ 			}
+ 
+@@ -15009,7 +15029,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 						? AUTO_THINKING
+ 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
+ 					: defaultThinkingLevel;
+-			this.#models.restoreThinkingLevel(restoredThinkingLevel);
++			this.#models.restoreThinkingLevel(restoredFallbackThinking ?? restoredThinkingLevel);
+ 			this.#models.restoreServiceTiers(
+ 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+ 			);
+@@ -15164,15 +15184,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 * none is in the catalog, refresh the discovery-backed providers among them
+ 	 * once and retry.
+ 	 */
+-	async #resolveSessionModel(selectors: readonly string[]): Promise<Model | undefined> {
+-		const resolve = (): Model | undefined => {
++	async #resolveSessionModel(selectors: readonly string[]): Promise<{
++		model: Model;
++		thinkingLevel?: ConfiguredThinkingLevel;
++		selector: string;
++	} | undefined> {
++		const resolve = async () => {
+ 			for (const selector of selectors) {
+ 				const restored = resolveSessionModelSelector(this.#modelRegistry, selector);
+-				if (restored) return restored.model;
++				if (!restored) continue;
++				try {
++					const apiKey = await this.#modelRegistry.getApiKey(restored.model, this.sessionId);
++					if (apiKey === kNoAuth || isAuthenticated(apiKey)) return { ...restored, selector };
++				} catch {
++					// Credential failures advance only within these saved selectors.
++				}
+ 			}
+ 			return undefined;
+ 		};
+-		const restored = resolve();
++		const restored = await resolve();
+ 		if (restored) return restored;
+ 		const providers = sessionModelDiscoveryProviders(
+ 			this.#modelRegistry,
+diff --git a/src/session/model-controls.ts b/src/session/model-controls.ts
+index 1f5ac5828ec6b33ddc32f75736237b8a589c639d..19ddbce8b16debd48c621eb49f83d7294dabebab 100644
+--- a/src/session/model-controls.ts
++++ b/src/session/model-controls.ts
+@@ -46,6 +46,7 @@ import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycl
+ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
+ import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
+ import type { SessionManager } from "./session-manager";
++import { getRetryFallbackRole } from "./retry-fallback-chains";
+ 
+ import {
+ 	cfgDefaultThinkingLevel,
+@@ -288,11 +289,14 @@ export class ModelControls {
+ 
+ 	async setModel(
+ 		model: Model,
+-		role: string = "default",
++		role?: string,
+ 		options?: {
+ 			selector?: string;
+-			thinkingLevel?: ThinkingLevel;
++			thinkingLevel?: ConfiguredThinkingLevel;
+ 			persist?: boolean;
++			/** Idle selection revalidates cancellation and native identity at the commit boundary. */
++			beforeCommit?: () => void;
++			signal?: AbortSignal;
+ 		},
+ 	): Promise<{ switched: boolean }> {
+ 		const previousEditMode = this.#host.resolveActiveEditMode();
+@@ -300,13 +304,25 @@ export class ModelControls {
+ 			throw new Error(`No API key for ${model.provider}/${model.id}`);
+ 		}
+ 
+-		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
++		let targetModel: Model;
++		if (options?.signal) {
++			const signal = options.signal;
++			signal.throwIfAborted();
++			const cancelled = Promise.withResolvers<never>();
++			const onAbort = () => cancelled.reject(signal.reason);
++			signal.addEventListener("abort", onAbort, { once: true });
++			try {
++				targetModel = await Promise.race([this.#host.modelRegistry.refreshSelectedModelMetadata(model), cancelled.promise]);
++			} finally { signal.removeEventListener("abort", onAbort); }
++		} else {
++			targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
++		}
++		options?.beforeCommit?.();
+ 
+ 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
+ 		this.#host.clearActiveRetryFallback();
+ 		await this.#host.setModelWithProviderSessionReset(targetModel);
+-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+-		if (options?.persist) {
++		if (options?.persist && role) {
+ 			this.#host.settings.setModelRole(
+ 				role,
+ 				formatRoleModelValue(
+@@ -319,9 +335,17 @@ export class ModelControls {
+ 				),
+ 			);
+ 		}
++		// Capture the selected role before an extension's scoped settings lease can end.
++		this.#host.sessionManager.appendModelChange(
++			formatModelStringWithRouting(targetModel), role ?? "temporary", false,
++			role ? getRetryFallbackRole(this.#host.settings, role) : undefined,
++		);
+ 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+ 
+-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
++		const roleThinking = role ? this.resolveRoleModelWithThinking(role).thinkingLevel : undefined;
++		const thinkingLevel = options?.thinkingLevel ?? roleThinking;
++		if (thinkingLevel !== undefined) this.setThinkingLevel(thinkingLevel);
++		else this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+ 		await this.#host.syncAfterModelChange(previousEditMode);
+ 		return { switched: true };
+ 	}
+@@ -351,12 +375,11 @@ export class ModelControls {
+ 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
+ 		this.#host.clearActiveRetryFallback();
+ 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
+-		// Identity, not object equality: the agent's resolver and metadata rebinds swap in refitted rows of the
+-		// same model. Only a different model means another selection replaced this one during reconciliation.
++		// Registry metadata rebinds can replace a row without replacing its identity.
+ 		const landed = modelsAreEqual(this.#model, targetModel);
+ 		if (landed) {
+ 			this.#host.sessionManager.appendModelChange(
+-				`${targetModel.provider}/${targetModel.id}`,
++				formatModelStringWithRouting(targetModel),
+ 				options?.prewalk
+ 					? PREWALK_MODEL_CHANGE_ROLE
+ 					: options?.ephemeral
+diff --git a/src/session/retry-fallback-chains.ts b/src/session/retry-fallback-chains.ts
+index 1a3bf20d22fee6ec4b819df98bd0345e6f97654f..6c0f9d54aa547b663bf247c8ec9c4ccccd4a2ccf 100644
+--- a/src/session/retry-fallback-chains.ts
++++ b/src/session/retry-fallback-chains.ts
+@@ -13,6 +13,7 @@ import {
+ } from "@oh-my-pi/pi-tui/thinking";
+ import { resolveConfiguredModelPatterns, resolveModelRoleValue, revisionSpellingKey } from "../config/model-resolver";
+ import { getRoleInfo, isKindRole } from "../config/model-roles";
++import { resolveConfiguredRoleFallbackChain } from "../config/role-fallbacks";
+ 
+ import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
+ 
+@@ -180,17 +181,23 @@ export function expandDefaultRetryFallbackChains(
+ 	return chains;
+ }
+ 
+-/** Resolves configured fallback chains, applying the default chain to named roles. */
++/** Resolves alias inheritance before applying chat-role default chains. */
+ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains {
+ 	const configuredChains = cfgRetryFallbackChains.get(settings);
+ 	if (!configuredChains || typeof configuredChains !== "object") return {};
+-	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
++	const chains: RetryFallbackChains = { ...configuredChains };
++	const roles = Object.keys(settings.getModelRoles());
++	for (const role of roles) {
++		const chain = resolveConfiguredRoleFallbackChain(role, configuredChains, key => settings.getModelRole(key));
++		if (chain !== undefined) chains[role] = [...chain];
++	}
++	return expandDefaultRetryFallbackChains(chains, roles);
+ }
+ 
+ /**
+- * A dynamic role pinned to one model selector with its own fallback chain.
+- * Subagents own one under `subagent:<id>`; `session_init` persists it so cold
+- * revival restores the same routing the spawn installed.
++ * A role pinned to an ordered, closed selector plan. `session_init` retains
++ * the original spawn plan; committed `model_change` entries retain subsequent
++ * selections independently of the lifetime of their scoped settings.
+  */
+ export interface RetryFallbackRole {
+ 	/** Selector the role is assigned (the chain's primary). */
+@@ -199,12 +206,12 @@ export interface RetryFallbackRole {
+ 	chain: string[];
+ }
+ 
+-/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
++/** Reads a role's full ordered plan, closing aliases without borrowing any candidate's own chain. */
+ export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
+-	const primary = settings.getModelRole(role);
+-	const chain = cfgRetryFallbackChains.get(settings)[role];
+-	if (!primary || !Array.isArray(chain)) return undefined;
+-	return { primary, chain };
++	const [primary, ...remaining] = resolveConfiguredModelPatterns(settings.getModelRole(role), settings);
++	const chain = resolveConfiguredRoleFallbackChain(role, cfgRetryFallbackChains.get(settings), key => settings.getModelRole(key));
++	if (!primary || chain === undefined) return undefined;
++	return { primary, chain: [...remaining, ...chain.flatMap(selector => resolveConfiguredModelPatterns(selector, settings))] };
+ }
+ 
+ /**
+@@ -383,7 +390,8 @@ function getRetryFallbackPrimarySelector(
+ 	if (isRetryFallbackWildcardKey(chainKey)) return undefined;
+ 	if (isRetryFallbackModelKey(chainKey)) return parseRetryFallbackSelector(chainKey, context.modelLookup);
+ 	const configuredSelector = context.getModelRole(chainKey);
+-	return configuredSelector ? parseRetryFallbackSelector(configuredSelector, context.modelLookup) : undefined;
++	const primary = resolveConfiguredModelPatterns(configuredSelector, { getModelRole: context.getModelRole })[0];
++	return primary ? parseRetryFallbackSelector(primary, context.modelLookup) : undefined;
+ }
+ 
+ /** How a chain key's primary selector matches the current selector. */
+@@ -437,9 +445,9 @@ function selectorMatchKind(
+ }
+ 
+ /**
+- * Resolve the chain key for a concrete selector by specificity: exact model,
+- * longest matching wildcard, hinted role, then matching role keys with
+- * `default` preferred over other shared assignments, then default.
++ * An explicitly selected role owns its closed chain. Without role provenance,
++ * only concrete model keys and provider wildcards apply; shared model identity
++ * never implies a role assignment.
+  */
+ export function resolveRetryFallbackChainKey(
+ 	context: RetryFallbackResolutionContext,
+@@ -447,6 +455,11 @@ export function resolveRetryFallbackChainKey(
+ 	currentModel?: Model | null,
+ 	roleHint?: string,
+ ): string | undefined {
++	if (roleHint) {
++		return resolveConfiguredRoleFallbackChain(roleHint, context.chains, role => context.getModelRole(role)) !== undefined
++			? roleHint
++			: undefined;
++	}
+ 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
+ 	const currentPlainSelector = currentModel
+ 		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
+@@ -454,19 +467,14 @@ export function resolveRetryFallbackChainKey(
+ 	const parsedCurrent =
+ 		parsedConfigured ??
+ 		(currentPlainSelector ? parseRetryFallbackSelector(currentPlainSelector, context.modelLookup) : undefined);
+-	if (!parsedCurrent) {
+-		if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
+-		return undefined;
+-	}
++	if (!parsedCurrent) return undefined;
+ 	const parsedPlainCurrent =
+ 		currentPlainSelector && currentPlainSelector !== currentSelector
+ 			? (parseRetryFallbackSelector(currentPlainSelector, context.modelLookup) ?? parsedCurrent)
+ 			: undefined;
+ 
+-	// 1. Model-selector keys — most specific. Parsed exact effort beats
+-	//    model-normalized effort, which beats a suffixless (any-effort) key,
+-	//    regardless of object/YAML order. Efforts that remain distinct after
+-	//    normalization never match.
++	// Model keys retain exact > normalized > suffixless specificity for
++	// concrete selections, independent of configured role assignments.
+ 	let normalizedModelKey: string | undefined;
+ 	let baseModelKey: string | undefined;
+ 	for (const key in context.chains) {
+@@ -484,8 +492,7 @@ export function resolveRetryFallbackChainKey(
+ 	if (normalizedModelKey) return normalizedModelKey;
+ 	if (baseModelKey) return baseModelKey;
+ 
+-	// 2. Provider wildcards — an id-prefixed key (`openrouter/google/*`)
+-	//    beats the plain `provider/*` key for ids under its prefix.
++	// Provider wildcards: longest id prefix wins.
+ 	let wildcardMatch: string | undefined;
+ 	let wildcardPrefixLength = -1;
+ 	for (const key in context.chains) {
+@@ -503,46 +510,6 @@ export function resolveRetryFallbackChainKey(
+ 	}
+ 	if (wildcardMatch) return wildcardMatch;
+ 
+-	// 3. The hinted role, then role keys matched by their assigned model.
+-	// A shared assignment (default and vision both the same model) must not
+-	// let yaml insertion order steal the live role's chain. Prefer the hint,
+-	// then `default` when it also matches. A role assigned the live model at a
+-	// different explicit effort (spawn `effort`, `/thinking`) still owns it,
+-	// but only after every role whose effort matches. Model-kind roles (`web`,
+-	// `judge`, ...) never match by model: a shared model assignment does not
+-	// mean the chat session owns the kind role (kind chains may hold chat
+-	// models too), so it must not adopt that chain. They apply only through the
+-	// explicit role hint above.
+-	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
+-	let matchedRole: string | undefined;
+-	let effortRole: string | undefined;
+-	for (const key in context.chains) {
+-		if (isRetryFallbackModelKey(key) || isKindRole(key)) continue;
+-		const kind = selectorMatchKind(
+-			getRetryFallbackPrimarySelector(context, key),
+-			parsedCurrent,
+-			parsedPlainCurrent,
+-			currentModel,
+-		);
+-		if (kind === "none") continue;
+-		if (kind === "effort") {
+-			if (key === "default" || effortRole === undefined) effortRole = key;
+-			continue;
+-		}
+-		if (key === "default") return "default";
+-		matchedRole ??= key;
+-	}
+-	if (matchedRole) return matchedRole;
+-	if (effortRole) return effortRole;
+-
+-	// 4. The default chain. Use it even when `default` has an explicit role
+-	//    primary that is a *different* model than the live one (#12421): a
+-	//    /model switch or a mid-chain hop onto Fable/Astra must still reach
+-	//    glm/grok/… instead of resolving no key and aborting on wait > maxDelayMs.
+-	const defaultChain = context.chains.default;
+-	if (Array.isArray(defaultChain) && defaultChain.length > 0) {
+-		return "default";
+-	}
+ 	return undefined;
+ }
+ 
+@@ -623,11 +590,16 @@ function getRetryFallbackEffectiveChain(
+ 			return [];
+ 		}
+ 	}
+-	for (const selector of context.chains[chainKey] ?? []) {
+-		const parsed = parseRetryFallbackChainEntry(context, selector, parsedCurrent);
+-		if (!parsed || seen.has(identity(parsed))) continue;
+-		seen.add(identity(parsed));
+-		chain.push(parsed);
++	const configuredChain = isRetryFallbackModelKey(chainKey)
++		? context.chains[chainKey]
++		: resolveConfiguredRoleFallbackChain(chainKey, context.chains, role => context.getModelRole(role));
++	for (const selector of configuredChain ?? []) {
++		for (const pattern of resolveConfiguredModelPatterns(selector, { getModelRole: context.getModelRole })) {
++			const parsed = parseRetryFallbackChainEntry(context, pattern, parsedCurrent);
++			if (!parsed || seen.has(identity(parsed))) continue;
++			seen.add(identity(parsed));
++			chain.push(parsed);
++		}
+ 	}
+ 	return chain;
+ }
+diff --git a/src/session/role-models.ts b/src/session/role-models.ts
+index 8d58c602859a68c689074c3e62f8cb2258e56b7a..d9a6d19eb8d606abf22569d7c5aa93fcb4d3e56d 100644
+--- a/src/session/role-models.ts
++++ b/src/session/role-models.ts
+@@ -1,4 +1,4 @@
+-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+ import type { Model } from "@oh-my-pi/pi-ai";
+ import type { ModelRegistry } from "../config/model-registry";
+ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+@@ -17,7 +17,7 @@ export function formatRoleModelValue(
+ 	role: string,
+ 	model: Model,
+ 	selectorOverride?: string,
+-	thinkingLevelOverride?: ThinkingLevel,
++	thinkingLevelOverride?: ConfiguredThinkingLevel,
+ ): string {
+ 	const modelKey = selectorOverride ?? `${model.provider}/${model.id}`;
+ 	if (thinkingLevelOverride !== undefined) return formatModelSelectorValue(modelKey, thinkingLevelOverride);
+diff --git a/src/session/session-context.ts b/src/session/session-context.ts
+index b9e602eefbd0718f52c453faa8dc173bb54b2752..0a6989b3e85c9b72d67add69bd6fc3ad8f5031ee 100644
+--- a/src/session/session-context.ts
++++ b/src/session/session-context.ts
+@@ -28,6 +28,8 @@ import {
+ 	type CompactionEntry,
+ 	type CustomMessageEntry,
+ 	EPHEMERAL_MODEL_CHANGE_ROLE,
++	PREWALK_MODEL_CHANGE_ROLE,
++	type ModelChangeEntry,
+ 	resolveSessionLeafId,
+ 	type SessionEntry,
+ 	type SessionMessageEntry,
+@@ -120,6 +122,8 @@ export interface SessionContext {
+ 	serviceTier?: ServiceTierByFamily;
+ 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
+ 	models: Record<string, string>;
++	/** Latest committed selection, excluding retry/prewalk transitions. */
++	selectedModelChange?: ModelChangeEntry;
+ 	/** Names of TTSR rules that have been injected this session */
+ 	injectedTtsrRules: string[];
+ 	/** Active mode (e.g. "plan") or "none" if no special mode is active */
+@@ -140,7 +144,7 @@ export interface SessionContext {
+ 	nextCacheMissExplained?: boolean;
+ }
+ 
+-/** Lists session model strings to try when restoring, in fallback order. */
++/** Restore the selected non-ephemeral identity without borrowing another role's model. */
+ export function getRestorableSessionModels(
+ 	models: Readonly<Record<string, string>>,
+ 	lastModelChangeRole: string | undefined,
+@@ -155,9 +159,7 @@ export function getRestorableSessionModels(
+ 	}
+ 
+ 	const roleModel = models[lastModelChangeRole];
+-	if (!roleModel) return defaultModel ? [defaultModel] : [];
+-	if (!defaultModel || roleModel === defaultModel) return [roleModel];
+-	return [roleModel, defaultModel];
++	return roleModel ? [roleModel] : [];
+ }
+ 
+ export function getLatestCompactionEntry(entries: readonly SessionEntry[]): CompactionEntry | null {
+@@ -332,6 +334,7 @@ export function buildSessionContext(
+ 	let configuredThinkingLevel: string | undefined;
+ 	let serviceTier: ServiceTierByFamily | undefined;
+ 	const models: Record<string, string> = {};
++	let selectedModelChange: ModelChangeEntry | undefined;
+ 	let compaction: CompactionEntry | null = null;
+ 	const injectedTtsrRulesSet = new Set<string>();
+ 	let mode = "none";
+@@ -370,6 +373,9 @@ export function buildSessionContext(
+ 			if (entry.model) {
+ 				const role = entry.role ?? "default";
+ 				models[role] = entry.model;
++				if (role !== EPHEMERAL_MODEL_CHANGE_ROLE && role !== PREWALK_MODEL_CHANGE_ROLE) {
++					selectedModelChange = entry;
++				}
+ 				if (role === "default") {
+ 					hasExplicitDefaultModel = true;
+ 				}
+@@ -852,6 +858,7 @@ export function buildSessionContext(
+ 		configuredThinkingLevel,
+ 		serviceTier,
+ 		models,
++		selectedModelChange,
+ 		injectedTtsrRules,
+ 		mode,
+ 		modeData,
+diff --git a/src/session/session-entries.ts b/src/session/session-entries.ts
+index 563062a2aedd6b3c6ec74150086d338a50577439..ffdd3d1a1be7cec8028968839d6083a645d33dd7 100644
+--- a/src/session/session-entries.ts
++++ b/src/session/session-entries.ts
+@@ -211,6 +211,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
+ 	role?: string;
+ 	/** True when this transition selected a retry-fallback model rather than the configured model. */
+ 	resolvedModelIsFallback?: boolean;
++	/** Closed role plan captured at a committed selection; absent in older sessions. */
++	retryFallback?: RetryFallbackRole;
+ }
+ 
+ export interface ServiceTierChangeEntry extends SessionEntryBase {
+diff --git a/src/session/session-manager.ts b/src/session/session-manager.ts
+index ac31d4b6362f23965e07e1c968003fbb0238c436..99fff7e98bf04381ef01c152aca3457b7f33cddb 100644
+--- a/src/session/session-manager.ts
++++ b/src/session/session-manager.ts
+@@ -3683,13 +3683,14 @@ export class SessionManager {
+ 	 * @param role Optional role (default: "default")
+ 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+ 	 */
+-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
++	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false, retryFallback?: RetryFallbackRole): string {
+ 		const entry: ModelChangeEntry = {
+ 			type: "model_change",
+ 			...this.#freshEntryFields(),
+ 			model,
+ 			role,
+ 			resolvedModelIsFallback,
++			...(retryFallback ? { retryFallback: { primary: retryFallback.primary, chain: [...retryFallback.chain] } } : {}),
+ 		};
+ 		this.#recordEntry(entry);
+ 		return entry.id;
+diff --git a/src/session/turn-recovery.ts b/src/session/turn-recovery.ts
+index 48db4278699f14878081997f375f85a14986fb53..61824b953916a3f2c03d6b33a7276df2aa17e543 100644
+--- a/src/session/turn-recovery.ts
++++ b/src/session/turn-recovery.ts
+@@ -1989,13 +1989,7 @@ export class TurnRecovery {
+ 		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
+ 	}
+ 
+-	/**
+-	 * Map the failing model selector to the chain key that owns it, by
+-	 * specificity: an exact model-selector key, then a `provider/*` wildcard,
+-	 * then a model role whose current assignment matches, then `default`.
+-	 * Model-oriented keys win over roles so a chain follows the model across
+-	 * role reassignments.
+-	 */
++	/** Explicit role provenance owns its plan; concrete selections use model-key specificity. */
+ 	resolveRetryFallbackRole(
+ 		currentSelector: string,
+ 		currentModel: Model | null | undefined = this.#host.model(),
+@@ -2009,46 +2003,24 @@ export class TurnRecovery {
+ 		);
+ 	}
+ 
+-	/**
+-	 * Chain keys to consult for the active model, most specific walk first: the
+-	 * chain that owns the current fallback walk, then the chain the CURRENT model
+-	 * owns when that is a different key.
+-	 *
+-	 * The second key is what makes a chain reachable from the end of another one.
+-	 * `#activeRetryFallback.role` is pinned at the first hop and never
+-	 * re-resolved, so a session that lands on the last entry of one chain has no
+-	 * candidate left and retries the same model until the budget is gone — even
+-	 * when that entry is itself a chain key with its own fallbacks configured
+-	 * (`anthropic/claude-opus-5 -> … -> runinfra/deepseek-v4-pro`, whose own
+-	 * `runinfra/deepseek-v4-pro -> openrouter/deepseek/…` chain was unreachable).
+-	 *
+-	 * Two keys is the whole walk per attempt. Chains that point at each other
+-	 * alternate models instead of looping in place, and every hop still spends a
+-	 * retry attempt, so the budget terminates either way.
+-	 */
++	/** A logical role owns a closed plan; only direct-model walks may join model-key chains. */
+ 	retryFallbackChainKeys(
+ 		currentSelector: string,
+ 		currentModel: Model | null | undefined = this.#host.model(),
+ 		options?: { pinnedRole?: string; roleHint?: string },
+ 	): string[] {
++		const roleHint = options?.roleHint ?? this.#liveRetryRoleHint(currentModel);
+ 		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+-		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
++		if (roleHint) return pinned ? [pinned] : [roleHint];
++		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, roleHint);
+ 		if (!pinned) return current ? [current] : [];
+ 		return current && current !== pinned ? [pinned, current] : [pinned];
+ 	}
+ 
+-	/**
+-	 * Live session role for chain lookup, provided its assignment still matches the active model.
+-	 * Temporary switches record the `fallback` role; skipping them keeps the assigned role (e.g. a
+-	 * subagent's own, possibly empty, chain) once the session is back on that role's model.
+-	 */
+-	#liveRetryRoleHint(currentModel: Model | null | undefined): string | undefined {
++	/** Role provenance survives fallback hops; shared model identity never implies a role. */
++	#liveRetryRoleHint(_currentModel: Model | null | undefined): string | undefined {
+ 		const role = this.#host.sessionManager?.getLastModelChangeRole?.({ skipEphemeral: true });
+-		if (!role || !currentModel) return undefined;
+-		const configured = this.#host.settings.getModelRole(role);
+-		if (!configured) return undefined;
+-		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
+-		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
++		return role && role !== "temporary" ? role : undefined;
+ 	}
+ 
+ 	/** Finds fallback candidates that follow the active selector. */
+diff --git a/src/slash-commands/builtin-modes.ts b/src/slash-commands/builtin-modes.ts
+index f9dd630d7f0964c5e32f92486930ba46487468dd..28121fb0f8a2ab334e74560b5bd564e9d26385d2 100644
+--- a/src/slash-commands/builtin-modes.ts
++++ b/src/slash-commands/builtin-modes.ts
+@@ -431,8 +431,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+ 					);
+ 				}
+ 				try {
+-					await runtime.session.setModel(match);
+-					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
++					await runtime.session.setModel(match, resolved.configuredRole, {
++						selector: resolved.selector,
++						thinkingLevel: resolved.thinkingLevel,
++					});
+ 					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
+ 					await runtime.notifyTitleChanged?.();
+ 					await runtime.notifyConfigChanged?.();
+@@ -479,7 +481,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+ 			const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
+ 			if (!resolved.model) return usage(`Unknown model: ${selector}`, runtime);
+ 			try {
+-				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
++				await runtime.session.setModel(resolved.model, resolved.configuredRole, {
++					selector: resolved.selector,
++					thinkingLevel: resolved.thinkingLevel,
++				});
+ 				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}.`);
+ 				await runtime.notifyTitleChanged?.();
+ 				await runtime.notifyConfigChanged?.();
+@@ -501,7 +506,12 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+ 				return;
+ 			}
+ 			if (resolved.warning) runtime.ctx.showStatus(resolved.warning);
+-			await runtime.ctx.switchSessionModel(resolved.model, resolved.thinkingLevel);
++			await runtime.ctx.switchSessionModel(
++				resolved.model,
++				resolved.thinkingLevel,
++				resolved.configuredRole,
++				resolved.selector,
++			);
+ 		},
+ 	},
+ 	{
+diff --git a/src/thread/remote-agent-session.ts b/src/thread/remote-agent-session.ts
+index e9d07ea441763d7729ee2b4af2843d0c964c40f8..0b5790f6e6f95d1c374d768f12e50040dac61975 100644
+--- a/src/thread/remote-agent-session.ts
++++ b/src/thread/remote-agent-session.ts
+@@ -577,6 +577,7 @@ export class RemoteAgentSession implements AgentViewSession {
+ 		return next;
+ 	}
+ 
++
+ 	setModelTemporary(
+ 		model: Model,
+ 		thinkingLevel?: ConfiguredThinkingLevel,
+diff --git a/src/tiny/online-candidates.ts b/src/tiny/online-candidates.ts
+index d35ccfc20f990b539665256f75930359cb2fb1ce..cca27a88ddfec7126a59a43ca7bade87b6b4f4a5 100644
+--- a/src/tiny/online-candidates.ts
++++ b/src/tiny/online-candidates.ts
+@@ -4,6 +4,7 @@ import type { Settings } from "../config/settings";
+ import {
+ 	expandDefaultRetryFallbackChains,
+ 	findRetryFallbackCandidates,
++	getRetryFallbackChains,
+ 	type RetryFallbackChains,
+ 	type RetryFallbackResolutionContext,
+ 	resolveRetryFallbackChainKey,
+@@ -50,8 +51,8 @@ type ExpandItem = {
+ };
+ 
+ /**
+- * Transitively expand retry fallback candidates from seed models into `out`.
+- * Callers choose whether `context.chains` already merged role defaults.
++ * Expand retry fallback candidates from seeds into `out`. Selected role
++ * plans are closed; only concrete-model seeds follow model-keyed tails.
+  */
+ function expandFallbackCandidates(
+ 	seeds: ExpandItem[],
+@@ -93,13 +94,13 @@ function expandFallbackCandidates(
+ 			const fallback = resolved.model ?? context.modelLookup.find(candidate.provider, candidate.id);
+ 			if (!fallback) continue;
+ 			if (!add(role, fallback)) continue;
+-			// After landing on this fallback, consult its own chain key so configs
+-			// like `tiny: [B]` + `B: [C]` reach C (session recovery does the same).
+-			queue.push({
+-				role,
+-				model: fallback,
+-				selector: formatModelStringWithRouting(fallback),
+-			});
++			if (!roleHint) {
++				queue.push({
++					role,
++					model: fallback,
++					selector: formatModelStringWithRouting(fallback),
++				});
++			}
+ 		}
+ 	}
+ }
+@@ -107,11 +108,9 @@ function expandFallbackCandidates(
+ /**
+  * Collect unique online models for lightweight background tasks.
+  *
+- * Order: each requested role's primary, then canonical retry fallback chains
+- * traversed transitively (so a hop onto B also consults B's own chain).
++ * Order: each explicitly requested role's primary, then its closed retry plan.
+  * Disabling model fallback restricts attempts to the first resolvable primary,
+- * unless `tryAllRoles` asks for the explicit role chain without configured
+- * retry-chain expansion.
++ * unless `tryAllRoles` requests all explicit role primaries (as titles do).
+  */
+ export function collectOnlineTinyCandidates(
+ 	roles: readonly string[],
+@@ -141,8 +140,7 @@ export function collectOnlineTinyCandidates(
+ 	}
+ 	if (!fallbackEnabled) return out;
+ 
+-	const configuredChains = cfgRetryFallbackChains.get(settings);
+-	if (!configuredChains || typeof configuredChains !== "object") return out;
++	const configuredChains = getRetryFallbackChains(settings);
+ 
+ 	const context = createFallbackContext(
+ 		expandDefaultRetryFallbackChains(configuredChains, roles),
+@@ -168,14 +166,8 @@ export function collectOnlineTinyCandidates(
+ /**
+  * Expand one model's own `retry.fallbackChains` transitively.
+  *
+- * With a role hint, use the role's configured chain even when the role has no
+- * configured primary, else the configured `default` chain, which roles that are
+- * not model kinds inherit as in `collectOnlineTinyCandidates`. Only configured
+- * chains apply: a role's built-in priority list never adds fallbacks, so a
+- * retry cannot move to a model the user did not select. Model-keyed and
+- * wildcard chains retain their precedence.
+- * Without a role hint, consult only the configured model-keyed / wildcard /
+- * matching-role keys that `resolveRetryFallbackChainKey` already selects.
++ * With an explicit role hint, expand only its configured closed chain.
++ * Without a role hint, consult only concrete model-keyed and wildcard chains.
+  */
+ export function expandOnlineTinyModelFallbacks(
+ 	model: Model<Api>,

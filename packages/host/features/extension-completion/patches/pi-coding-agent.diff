@@ -1,0 +1,426 @@
+diff --git a/dist/types/extensibility/extensions/completion.d.ts b/dist/types/extensibility/extensions/completion.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..253ab5042614de2697bb7191e40ae9eb820ac2bb
+--- /dev/null
++++ b/dist/types/extensibility/extensions/completion.d.ts
+@@ -0,0 +1,23 @@
++import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
++import type { ModelRegistry } from "../../config/model-registry";
++import type { JudgmentUsage } from "../../judgment";
++import type { CostGate } from "../../session/cost-gate";
++import type { ExtensionContext } from "./types";
++export type ExtensionCompletionErrorCode = "EXTENSION_COMPLETION_UNAVAILABLE" | "EXTENSION_COMPLETION_MODEL_UNAVAILABLE" | "EXTENSION_COMPLETION_CAPACITY" | "EXTENSION_COMPLETION_CREDENTIALS" | "EXTENSION_COMPLETION_COST_GATE" | "EXTENSION_COMPLETION_CANCELLED" | "EXTENSION_COMPLETION_PROVIDER_FAILED";
++/** Safe public failure: never includes provider exception text, credentials, or abort reasons. */
++export declare class ExtensionCompletionError extends Error {
++    readonly code: ExtensionCompletionErrorCode;
++    constructor(code: ExtensionCompletionErrorCode, message: string);
++}
++/** Host-owned dependencies; none of these mutable controls is exposed through ctx.complete. */
++export interface ExtensionCompletionDeps {
++    registry: ModelRegistry;
++    sessionId: string;
++    purpose: string;
++    assertActive(): void;
++    costGate?: CostGate;
++    telemetry?: AgentTelemetryConfig;
++    onUsage?: (usage: JudgmentUsage) => void;
++}
++/** Exactly one toolless native request, never role selection, history, or model mutation. */
++export declare function createExtensionCompletion(deps: ExtensionCompletionDeps): ExtensionContext["complete"];
+diff --git a/dist/types/extensibility/extensions/runner.d.ts b/dist/types/extensibility/extensions/runner.d.ts
+index fad0b25ef5494488c6cb642c7336b903724c4916..c9aa8d59ef253326e0079103bdfdbf867138706e 100644
+--- a/dist/types/extensibility/extensions/runner.d.ts
++++ b/dist/types/extensibility/extensions/runner.d.ts
+@@ -338,6 +338,12 @@ export declare class ExtensionRunner {
+     runScoped<T>(fn: () => T): T;
+     /** Bind the session-owned judge without exposing its ledger or cost gate to extensions. */
+     setJudgeFactory(createJudge: (toolName: string) => Judge): void;
++    /** Bind the session-owned native completion without exposing accounting controls. */
++    setCompletionFactory(createCompletion: (toolName: string, assertActive: () => void) => ExtensionContext["complete"]): void;
++    /** Invalidate contexts and cancel requests before a session abort or replacement. */
++    cancelCompletions(): void;
++    /** Settle cancelled completions before the owning session journal is replaced or closed. */
++    waitForCompletions(): Promise<void>;
+     /**
+      * Creates an extension context, optionally scoped to a provider request model.
+      *
+diff --git a/dist/types/extensibility/extensions/types.d.ts b/dist/types/extensibility/extensions/types.d.ts
+index 306586c849b2787c4ebf99931ecc69a7183647c2..c2e48f4df066180acebae5aa49193dc44aa833fb 100644
+--- a/dist/types/extensibility/extensions/types.d.ts
++++ b/dist/types/extensibility/extensions/types.d.ts
+@@ -607,6 +607,15 @@ export interface ExtensionContext {
+      * host-attributed to `extension:<toolName>`. Rejects outside an active tool call.
+      */
+     judge: Judge["judge"];
++    /**
++     * One native toolless request using exactly `provider/id`, with only the supplied system
++     * and prompt. Never changes the session model or falls back to a role/default model.
++     * Only available during active registered-tool execution; inherits host accounting and
++     * caller/tool/session cancellation. Returns the original response, including error stop reasons.
++     * `reasoning` explicitly selects one of the model's supported thinking efforts; omitted uses the
++     * provider default. An unsupported effort fails like an unavailable model, never clamped silently.
++     */
++    complete(request: { model: string; system: string; prompt: string; reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" }, options?: { signal?: AbortSignal }): Promise<AssistantMessage>;
+     /** Whether the agent is idle (not streaming) */
+     isIdle(): boolean;
+     /** Abort the current agent operation */
+diff --git a/src/extensibility/extensions/completion.ts b/src/extensibility/extensions/completion.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9215faf74309a9e5d9174973529178232f1b944f
+--- /dev/null
++++ b/src/extensibility/extensions/completion.ts
+@@ -0,0 +1,110 @@
++import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry, Tokenizer, MESSAGE_FRAMING_TOKENS, OUTPUT_FIT_HEADWAY_TOKENS } from "@oh-my-pi/pi-agent-core";
++import { randomUUID } from "node:crypto";
++import { streamSimple, type AssistantMessage, type Context } from "@oh-my-pi/pi-ai";
++import type { Effort } from "@oh-my-pi/pi-catalog/effort";
++import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
++import type { ModelRegistry } from "../../config/model-registry";
++import type { JudgmentUsage } from "../../judgment";
++import type { CostGate } from "../../session/cost-gate";
++import type { ExtensionContext } from "./types";
++
++export type ExtensionCompletionErrorCode = "EXTENSION_COMPLETION_UNAVAILABLE" | "EXTENSION_COMPLETION_MODEL_UNAVAILABLE" |
++	"EXTENSION_COMPLETION_CAPACITY" | "EXTENSION_COMPLETION_CREDENTIALS" | "EXTENSION_COMPLETION_COST_GATE" |
++	"EXTENSION_COMPLETION_CANCELLED" | "EXTENSION_COMPLETION_PROVIDER_FAILED";
++
++/** Safe public failure: never includes provider exception text, credentials, or abort reasons. */
++export class ExtensionCompletionError extends Error {
++	constructor(readonly code: ExtensionCompletionErrorCode, message: string) {
++		super(message);
++		this.name = "ExtensionCompletionError";
++	}
++}
++
++/** Host-owned dependencies; none of these mutable controls is exposed through ctx.complete. */
++export interface ExtensionCompletionDeps {
++	registry: ModelRegistry;
++	sessionId: string;
++	purpose: string;
++	assertActive(): void;
++	costGate?: CostGate;
++	telemetry?: AgentTelemetryConfig;
++	onUsage?: (usage: JudgmentUsage) => void;
++}
++
++/** Exactly one toolless native request, never role selection, history, or model mutation. */
++export function createExtensionCompletion(deps: ExtensionCompletionDeps): ExtensionContext["complete"] {
++	return async (request, options) => {
++		let failureCode: ExtensionCompletionErrorCode = "EXTENSION_COMPLETION_PROVIDER_FAILED";
++		try {
++			const assertActive = () => {
++				if (options?.signal?.aborted) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CANCELLED", "ctx.complete: request cancelled");
++				deps.assertActive();
++			};
++			assertActive();
++			const model = deps.registry.getAvailable().find(candidate => `${candidate.provider}/${candidate.id}` === request.model);
++			if (!model) throw new ExtensionCompletionError("EXTENSION_COMPLETION_MODEL_UNAVAILABLE", "ctx.complete: exact model unavailable");
++			// An explicit effort is part of the exact identity: unsupported values fail instead of clamping.
++			const reasoning = request.reasoning as Effort | undefined;
++			if (reasoning !== undefined && (!model.thinking || !getSupportedEfforts(model).includes(reasoning))) {
++				throw new ExtensionCompletionError("EXTENSION_COMPLETION_MODEL_UNAVAILABLE", "ctx.complete: requested effort unsupported by model");
++			}
++			const context: Context = {
++				systemPrompt: [request.system],
++				messages: [{ role: "user", content: [{ type: "text", text: request.prompt }], timestamp: Date.now() }],
++			};
++			const tokenizer = new Tokenizer(model);
++			const inputTokens = tokenizer.countTokens(context.systemPrompt!) + tokenizer.countMessages(context.messages);
++			// Same local estimate margin and framing as the native output-budget fitter. Unlike a
++			// conversational turn this cannot compact, so no minimum-output floor may overflow.
++			const room = model.contextWindow - inputTokens - Math.ceil(inputTokens / 10) - MESSAGE_FRAMING_TOKENS - OUTPUT_FIT_HEADWAY_TOKENS;
++			if (room <= 0) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CAPACITY", "ctx.complete: prompt exceeds model context capacity");
++			const maxTokens = Math.min(model.maxTokens, room);
++			failureCode = "EXTENSION_COMPLETION_CREDENTIALS";
++			const key = await deps.registry.getApiKey(model, deps.sessionId, { signal: options?.signal });
++			assertActive();
++			if (!key) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CREDENTIALS", "ctx.complete: no credentials for requested model");
++			const headers = await deps.registry.resolveModelHeaders(model, options?.signal);
++			assertActive();
++			failureCode = "EXTENSION_COMPLETION_COST_GATE";
++			deps.costGate?.admit();
++			failureCode = "EXTENSION_COMPLETION_PROVIDER_FAILED";
++			const response: AssistantMessage = await instrumentedCompleteSimple(model, context, {
++				apiKey: deps.registry.resolver(model, deps.sessionId),
++				headers,
++				// Provider threads/cascades are request-local; sticky authentication and accounting
++				// deliberately retain the owning root session id above and below.
++				sessionId: randomUUID(),
++				signal: options?.signal,
++				maxTokens,
++				...(reasoning !== undefined ? { reasoning } : {}),
++			}, {
++				telemetry: resolveTelemetry(deps.telemetry, deps.sessionId),
++				oneshotKind: "extension_completion",
++				attributes: { "omp.extension.purpose": deps.purpose },
++				completeImpl: async (requestModel, requestContext, requestOptions) => {
++					// completeSimple re-samples ThinkingLoop failures. A bridge call is one native
++					// stream only, still protected by streamSimple's thinking-loop guard.
++					const stream = streamSimple(requestModel, requestContext, requestOptions);
++					for await (const _event of stream) {
++						// Drain deltas without retaining the streamed response history.
++					}
++					const response = await stream.result();
++					// Record the actual result before telemetry finalization or cancellation checks
++					// can reject it. No response means no fabricated usage entry.
++					deps.costGate?.record(response.usage.cost.total);
++					deps.onUsage?.({ purpose: deps.purpose, role: "explicit", api: response.api, provider: response.provider,
++						model: response.model, usage: response.usage, stopReason: response.stopReason, errorMessage: response.errorMessage });
++					return response;
++				},
++			});
++			assertActive();
++			return response;
++		} catch (error) {
++			if (error instanceof ExtensionCompletionError) throw error;
++			if (options?.signal?.aborted) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CANCELLED", "ctx.complete: request cancelled");
++			throw new ExtensionCompletionError(failureCode, failureCode === "EXTENSION_COMPLETION_COST_GATE"
++				? "ctx.complete: Cost cap reached; request refused by host cost gate"
++				: "ctx.complete: native request failed");
++		}
++	};
++}
+diff --git a/src/extensibility/extensions/runner.ts b/src/extensibility/extensions/runner.ts
+index c5104cda4570d112c33002a7163eb63a3824b51c..e7f9bac1cf7db17ff3c24265fe6b25e0d09f54e5 100644
+--- a/src/extensibility/extensions/runner.ts
++++ b/src/extensibility/extensions/runner.ts
+@@ -45,6 +45,7 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
+ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+ import { ManagedTimers } from "./managed-timers";
+ import { createExtensionModelQuery } from "./model-api";
++import { ExtensionCompletionError } from "./completion";
+ import { trackUserWaits, type UserWaitTracker } from "./user-wait";
+ import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+ import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
+@@ -634,6 +635,9 @@ export class ExtensionRunner {
+ 	#getSystemPromptFn: () => string[] = () => [];
+ 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
+ 	#createJudge?: (toolName: string) => Judge;
++	#createCompletion?: (toolName: string, assertActive: () => void) => ExtensionContext["complete"];
++	#completionLifetime = new AbortController();
++	#pendingCompletions = new Set<Promise<unknown>>();
+ 	#startLiveFn?: ExtensionContextActions["startLive"];
+ 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
+ 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
+@@ -1793,6 +1797,31 @@ export class ExtensionRunner {
+ 		this.#createJudge = createJudge;
+ 	}
+ 
++	/** Bind the session-owned native completion without exposing accounting controls. */
++	setCompletionFactory(createCompletion: (toolName: string, assertActive: () => void) => ExtensionContext["complete"]): void {
++		this.#createCompletion = createCompletion;
++	}
++
++	/** Invalidate contexts and cancel requests before a session abort or replacement. */
++	cancelCompletions(): void {
++		this.#completionLifetime.abort();
++		this.#completionLifetime = new AbortController();
++	}
++
++	/** Settle cancelled completions before the owning session journal is replaced or closed. */
++	async waitForCompletions(): Promise<void> {
++		await Promise.allSettled([...this.#pendingCompletions]);
++	}
++
++	#trackCompletion<T>(pending: Promise<T>): Promise<T> {
++		this.#pendingCompletions.add(pending);
++		pending.then(
++			() => this.#pendingCompletions.delete(pending),
++			() => this.#pendingCompletions.delete(pending),
++		);
++		return pending;
++	}
++
+ 	/**
+ 	 * Creates an extension context, optionally scoped to a provider request model.
+ 	 *
+@@ -1824,6 +1853,15 @@ export class ExtensionRunner {
+ 		const createJudge = this.#createJudge;
+ 		const sessionId = this.sessionId;
+ 		let judge: Judge | undefined;
++		const createCompletion = this.#createCompletion;
++		const completionLifetime = this.#completionLifetime.signal;
++		let complete: ExtensionContext["complete"] | undefined;
++		const assertCompletionActive = () => {
++			if (completionLifetime.aborted) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CANCELLED", "ctx.complete: request cancelled");
++			if (!delegation || delegation.closed !== false || !createCompletion || this.sessionId !== sessionId) {
++				throw new ExtensionCompletionError("EXTENSION_COMPLETION_UNAVAILABLE", "ctx.complete is only available during an active registered tool execution in its owning session.");
++			}
++		};
+ 		const runEphemeralTurn = this.#runEphemeralTurnFn;
+ 		const createAnnotations = this.#createAnnotations;
+ 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
+@@ -1857,6 +1895,17 @@ export class ExtensionRunner {
+ 						: options?.signal ?? delegation.signal;
+ 				return judge.judge(request, { ...options, signal });
+ 			},
++			complete: (request, options) => this.#trackCompletion((async () => {
++				assertCompletionActive();
++				const signals = [options?.signal, delegation?.signal, completionLifetime].filter((signal): signal is AbortSignal => signal !== undefined);
++				const signal = AbortSignal.any(signals);
++				if (signal.aborted) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CANCELLED", "ctx.complete: request cancelled");
++				complete ??= createCompletion!(delegation!.toolName, assertCompletionActive);
++				const response = await complete(request, { signal });
++				assertCompletionActive();
++				if (signal.aborted) throw new ExtensionCompletionError("EXTENSION_COMPLETION_CANCELLED", "ctx.complete: request cancelled");
++				return response;
++			})()),
+ 			isIdle: () => this.#isIdleFn(),
+ 			abort: () => this.#abortFn(),
+ 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
+diff --git a/src/extensibility/extensions/types.ts b/src/extensibility/extensions/types.ts
+index cb0ea5768ad2d515a05550ee87cff397cbcc43af..038f5d1d7a448cfbf009f35c648e28cfa3c5473f 100644
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -828,6 +828,15 @@ export interface ExtensionContext {
+ 	 * host-attributed to `extension:<toolName>`. Rejects outside an active tool call.
+ 	 */
+ 	judge: Judge["judge"];
++	/**
++	 * One native toolless request using exactly `provider/id`, with only the supplied system
++	 * and prompt. Never changes the session model or falls back to a role/default model.
++	 * Only available during active registered-tool execution; inherits host accounting and
++	 * caller/tool/session cancellation. Returns the original response, including error stop reasons.
++	 * `reasoning` explicitly selects one of the model's supported thinking efforts; omitted uses the
++	 * provider default. An unsupported effort fails like an unavailable model, never clamped silently.
++	 */
++	complete(request: { model: string; system: string; prompt: string; reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" }, options?: { signal?: AbortSignal }): Promise<AssistantMessage>;
+ 	/** Whether the agent is idle (not streaming) */
+ 	isIdle(): boolean;
+ 	/** Abort the current agent operation */
+diff --git a/src/extensibility/extensions/wrapper.ts b/src/extensibility/extensions/wrapper.ts
+index 4c6579375f47dfdc58680a849cd6b6639e2fad1e..23c54101ac6b85f60b8c780d01c134884d4f5048 100644
+--- a/src/extensibility/extensions/wrapper.ts
++++ b/src/extensibility/extensions/wrapper.ts
+@@ -138,10 +138,11 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
+ 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
+ 		// aborted, and still streams native progress.
++		const lifetime = new AbortController();
+ 		const delegation = {
+ 			toolName: this.registeredTool.definition.name,
+ 			context,
+-			signal,
++			signal: signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal,
+ 			onUpdate,
+ 			closed: false,
+ 		};
+@@ -155,6 +156,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 			);
+ 		} finally {
+ 			delegation.closed = true;
++			lifetime.abort();
+ 		}
+ 	}
+ }
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index 310c3fc389f4cca6115eab2ceea0c0cf9c2a0035..8cb38e9c402ff9b991743e5590b01d4c14e508bc 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -204,6 +204,7 @@ import {
+ 	sessionLocalProtocolOptions,
+ } from "../internal-urls";
+ import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
++import { createExtensionCompletion, ExtensionCompletionError } from "../extensibility/extensions/completion";
+ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+ import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
+ import type { DaemonCompletionEvent } from "../daemon/protocol";
+@@ -2475,6 +2476,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				costGate: this.#costGate,
+ 			}),
+ 		);
++		this.#extensionRunner?.setCompletionFactory((toolName, assertActive) =>
++			createExtensionCompletion({
++				registry: this.#modelRegistry,
++				sessionId: this.sessionId,
++				purpose: `extension:${toolName}`,
++				assertActive: () => {
++					assertActive();
++					if (this.#isDisposed) throw new Error("ctx.complete: session disposed");
++				},
++				onUsage: journalJudgmentUsage(this.sessionManager),
++				telemetry: this.agent.telemetry,
++				costGate: this.#costGate,
++			}),
++		);
+ 		this.#cacheWarmer = config.cacheWarmer;
+ 		if (config.cacheWarmer) {
+ 			const warmer = config.cacheWarmer;
+@@ -7084,6 +7099,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 */
+ 	beginDispose(): void {
+ 		this.#isDisposed = true;
++		this.#extensionRunner?.cancelCompletions();
+ 		for (const request of this.#idleModelRequests) request.abort();
+ 		for (const dispose of this.#disposers.splice(0)) dispose();
+ 		if (this.#runActive) this.#closeRun();
+@@ -7283,6 +7299,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const abortReason = cutsTurnOff(options.reason) ? INTERRUPTED_TURN_ERROR : undefined;
+ 		const postPromptDrain = this.#cancelPostPromptTasks(abortReason);
+ 		this.agent.abort(abortReason);
++		await this.#extensionRunner?.waitForCompletions();
+ 		try {
+ 			await withTimeout(
+ 				postPromptDrain,
+@@ -10403,6 +10420,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			judge: async () => {
+ 				throw new Error("ctx.judge is only available during an active registered tool execution.");
+ 			},
++			complete: async () => {
++				throw new ExtensionCompletionError("EXTENSION_COMPLETION_UNAVAILABLE", "ctx.complete is unavailable without an active registered tool execution and session runner.");
++			},
+ 			// The SDK always builds a runner (which receives the annotations factory); this runner-less
+ 			// context only exists for directly constructed sessions, which have no `/annotate` wiring.
+ 			annotations: UNAVAILABLE_ANNOTATIONS,
+@@ -12788,6 +12808,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
+ 		preserveCompaction?: boolean;
+ 	}): Promise<void> {
++		this.#extensionRunner?.cancelCompletions();
+ 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
+ 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+ 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
+@@ -12941,6 +12962,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		this.#disconnectFromAgent();
+ 		let advisorRecordersDetached = false;
+ 		await this.abort();
++		// Persist billed late responses to the old journal before replacing its session id.
++		await this.#extensionRunner?.waitForCompletions();
+ 		this.#cancelOwnAsyncJobs();
+ 		this.#closeAllProviderSessions("new session");
+ 		await this.#bash.flushPending();
+@@ -13120,6 +13143,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			}
+ 		}
+ 
++		this.#extensionRunner?.cancelCompletions();
++		await this.#extensionRunner?.waitForCompletions();
+ 		await this.flushToDisk();
+ 		// Work admitted during the hook or flush awaits would be copied mid-flight.
+ 		if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
+@@ -14861,6 +14886,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 
+ 		this.#disconnectFromAgent();
+ 		await this.abort({ goalReason: "internal" });
++		await this.#extensionRunner?.waitForCompletions();
+ 		await this.#sessionBeforeSwitchReconciler?.();
+ 
+ 		await this.#bash.flushPending();
+@@ -15357,6 +15383,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
+ 		}
+ 
++		this.#extensionRunner?.cancelCompletions();
++		await this.#extensionRunner?.waitForCompletions();
+ 		await this.#bash.flushPending();
+ 		this.#flushExcludedRows();
+ 		// Flush pending writes before branching
+@@ -15495,6 +15523,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			"Timed out draining post-prompt tasks before /btw branch",
+ 		);
+ 		this.#assertIdleForSnapshot("branch /btw");
++		this.#extensionRunner?.cancelCompletions();
++		await this.#extensionRunner?.waitForCompletions();
+ 
+ 		this.#pendingNextTurnMessages = [];
+ 		this.#pendingExcludedRows = [];

@@ -1,0 +1,1066 @@
+diff --git a/dist/types/extensibility/extensions/compact-handler.d.ts b/dist/types/extensibility/extensions/compact-handler.d.ts
+index 8d61de8dfd468535f71991a70494ae18357cb9dd..88b98215a80688445795e1c96769398d9bdfb49e 100644
+--- a/dist/types/extensibility/extensions/compact-handler.d.ts
++++ b/dist/types/extensibility/extensions/compact-handler.d.ts
+@@ -15,12 +15,12 @@ interface SetModelCapableSession {
+     modelRegistry: {
+         getApiKey(model: Model): Promise<string | undefined>;
+     };
+-    setModel(model: Model): Promise<unknown>;
++    setModel(model: Model, role?: string): Promise<unknown>;
+ }
+ /**
+  * Helper for wiring the `setModel` action of an {@link ExtensionContext}.
+  *
+  * Returns false when no API key is available for the requested model.
+  */
+-export declare function runExtensionSetModel(session: SetModelCapableSession, model: Model): Promise<boolean>;
++export declare function runExtensionSetModel(session: SetModelCapableSession, model: Model, role?: string): Promise<boolean>;
+ export {};
+diff --git a/dist/types/extensibility/extensions/loader.d.ts b/dist/types/extensibility/extensions/loader.d.ts
+index 0c9e865e8ba1d18d63dbd216e559d14992849196..f9e6b3ee11dac492fff844092eabf20d7d1100a6 100644
+--- a/dist/types/extensibility/extensions/loader.d.ts
++++ b/dist/types/extensibility/extensions/loader.d.ts
+@@ -1,5 +1,6 @@
++import type { ExtensionAPI } from "./types.js";
+ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+-import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
++import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+ import { EventBus } from "../../utils/event-bus.js";
+ import type { Extension, ExtensionFactory, ExtensionRuntime as IExtensionRuntime, LoadExtensionsResult, PreparedExtension, ProviderConfig, ShortcutConflict, SourceInfo, ToolDefinition, ToolInfo } from "./types.js";
+ /**
+@@ -35,7 +36,8 @@ export declare class ExtensionRuntime implements IExtensionRuntime {
+     getAllTools(): ToolInfo[];
+     setActiveTools(): Promise<void>;
+     getCommands(): never;
+-    setModel(): Promise<boolean>;
++    setModel(_model: Model, _role?: string): Promise<boolean>;
++    setModelWhenIdle: ExtensionAPI["setModelWhenIdle"];
+     getThinkingLevel(): ThinkingLevel;
+     setThinkingLevel(): void;
+     getServiceTiers(): ServiceTierByFamily;
+diff --git a/dist/types/extensibility/extensions/runner.d.ts b/dist/types/extensibility/extensions/runner.d.ts
+index 36d57d4fb370d811a73d54eee0769ebdf160c84c..1d271a6cdc53ce5522d44b716816b63ea8ab8cef 100644
+--- a/dist/types/extensibility/extensions/runner.d.ts
++++ b/dist/types/extensibility/extensions/runner.d.ts
+@@ -1,5 +1,6 @@
+ import { type AgentMessage, type AgentTool, type AgentToolContext, type AgentToolResult, type AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+ import type { AssistantMessage, CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
++import type { Judge } from "@oh-my-pi/pi-ai";
+ import { type KeyId } from "@oh-my-pi/pi-tui";
+ import type { ModelRegistry } from "../../config/model-registry.js";
+ import { type Settings } from "../../config/settings.js";
+@@ -334,6 +335,8 @@ export declare class ExtensionRunner {
+      * invoked directly by their controllers and route through here instead.
+      */
+     runScoped<T>(fn: () => T): T;
++    /** Bind the session-owned judge without exposing its ledger or cost gate to extensions. */
++    setJudgeFactory(createJudge: (toolName: string) => Judge): void;
+     /**
+      * Creates an extension context, optionally scoped to a provider request model.
+      *
+@@ -350,6 +353,8 @@ export declare class ExtensionRunner {
+      */
+     createContext(model?: Model, delegation?: {
+         toolName: string;
++        /** Set by the registered tool adapter; closed when execute settles. */
++        closed?: boolean;
+         depth?: number;
+         context?: AgentToolContext;
+         signal?: AbortSignal;
+diff --git a/dist/types/extensibility/extensions/types.d.ts b/dist/types/extensibility/extensions/types.d.ts
+index a18e666fac01c577ddc2ddae6c6a219c782f7515..3d60edc1e502ed3b5802bb3c04786aa142941dce 100644
+--- a/dist/types/extensibility/extensions/types.d.ts
++++ b/dist/types/extensibility/extensions/types.d.ts
+@@ -19,6 +19,7 @@ import type { LoopConditionConfig } from "@oh-my-pi/pi-tui/status-line/loop";
+ import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+ import type { Api, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream, Context, ImageContent, Model, ModelSpec, ProviderResponseMetadata, ServiceTier, ServiceTierByFamily, ServiceTierFamily, SimpleStreamOptions, Static, TextContent, TSchema, UsageProvider } from "@oh-my-pi/pi-ai";
++import type { Judge } from "@oh-my-pi/pi-ai";
+ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+ import type { AutocompleteItem, AutocompleteProvider, Component, EditorTheme, Keybinding, KeyId, OverlayHandle, OverlayOptions, TUI } from "@oh-my-pi/pi-tui";
+ import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
+@@ -600,6 +601,12 @@ export interface ExtensionContext {
+     model: Model | undefined;
+     /** Read-only model query facade: list / current / resolve / family. */
+     models: ExtensionModelQuery;
++    /**
++     * Run the host's native judge-role chain during this registered tool's execution.
++     * Inherits tool cancellation, cost gate, usage journal and telemetry; purpose is
++     * host-attributed to `extension:<toolName>`. Rejects outside an active tool call.
++     */
++    judge: Judge["judge"];
+     /** Whether the agent is idle (not streaming) */
+     isIdle(): boolean;
+     /** Abort the current agent operation */
+@@ -789,6 +796,13 @@ export interface ToolShellEnvironmentContext {
+ }
+ /** Supplies environment values for a user-initiated shell invocation. */
+ export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
++/** A human action on this tool's settled result, including restored history. */
++export interface ToolResultActionEvent<TParams extends TSchema = TSchema, TDetails = unknown> {
++    action: string;
++    toolCallId: string;
++    args: Static<TParams>;
++    result: AgentToolResult<TDetails>;
++}
+ /**
+  * Tool definition for registerTool().
+  */
+@@ -838,6 +852,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
+     execute(toolCallId: string, params: Static<TParams>, signal: AbortSignal | undefined, onUpdate: AgentToolUpdateCallback<TDetails> | undefined, ctx: ExtensionContext): Promise<AgentToolResult<TDetails>>;
+     /** Called on session lifecycle events - use to reconstruct state or cleanup resources */
+     onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
++    /**
++     * Handle an explicit native result-card action with a fresh host context.
++     * Restored cards supply their original call id, args and result, so this must
++     * not rely on an execute-time closure. Not a model-callable execution hook;
++     * handlers must interpret their own action ids, not execute action strings.
++     */
++    onResultAction?(event: ToolResultActionEvent<TParams, TDetails>, ctx: ExtensionContext): void | Promise<void>;
+     /**
+      * Custom rendering for tool call display.
+      *
+@@ -1079,6 +1100,12 @@ export interface UserPythonEvent {
+ export interface InputEvent {
+     type: "input";
+     text: string;
++    /**
++     * The text exactly as submitted, before any handler rewrite: every handler in
++     * the chain sees the same `originalText` even when earlier handlers replaced
++     * `text`. Audit what the user actually sent through this, never `text`.
++     */
++    originalText: string;
+     images?: ImageContent[];
+     source: "interactive" | "rpc" | "extension";
+ }
+@@ -1648,8 +1675,14 @@ export interface ExtensionAPI {
+     setActiveTools(toolNames: string[]): Promise<void>;
+     /** Get available slash commands in the current session. */
+     getCommands(): SlashCommandInfo[];
+-    /** Set the current model. Returns false if no API key available. */
+-    setModel(model: Model): Promise<boolean>;
++    /**
++     * Set the session model. An explicit role retains its configured fallback plan;
++     * omitting it selects a concrete model. Never persists global settings.
++     * Returns false if no API key is available.
++     */
++    setModel(model: Model, role?: string): Promise<boolean>;
++    /** Atomically select at true native idle; absent when this host does not support it. */
++    setModelWhenIdle?(model: Model, options?: { thinkingLevel?: ConfiguredThinkingLevel; signal?: AbortSignal }): Promise<boolean>;
+     /** Get current thinking level. */
+     getThinkingLevel(): ThinkingLevel | undefined;
+     /** Set thinking level for the current session. */
+@@ -1845,7 +1878,8 @@ export type GetActiveToolsHandler = () => string[];
+ export type GetAllToolsHandler = () => ToolInfo[];
+ export type GetCommandsHandler = () => SlashCommandInfo[];
+ export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
+-export type SetModelHandler = (model: Model) => Promise<boolean>;
++export type SetModelHandler = (model: Model, role?: string) => Promise<boolean>;
++export type SetModelWhenIdleHandler = NonNullable<ExtensionAPI["setModelWhenIdle"]>;
+ export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
+ export type SetThinkingLevelHandler = (level: ThinkingLevel, persist?: boolean) => void;
+ export type GetServiceTiersHandler = () => ServiceTierByFamily;
+@@ -1877,6 +1911,7 @@ export interface ExtensionActions {
+     setActiveTools: SetActiveToolsHandler;
+     getCommands: GetCommandsHandler;
+     setModel: SetModelHandler;
++    setModelWhenIdle?: SetModelWhenIdleHandler;
+     getThinkingLevel: GetThinkingLevelHandler;
+     setThinkingLevel: SetThinkingLevelHandler;
+     getServiceTiers?: GetServiceTiersHandler;
+diff --git a/dist/types/extensibility/extensions/wrapper.d.ts b/dist/types/extensibility/extensions/wrapper.d.ts
+index 4b938f031ce60f2ea58c1fa2b7737dccc6c45963..aa06acf1303bb175d22bbc6de0ee9ac47191ab2f 100644
+--- a/dist/types/extensibility/extensions/wrapper.d.ts
++++ b/dist/types/extensibility/extensions/wrapper.d.ts
+@@ -4,7 +4,7 @@
+ import { type AgentTool, type AgentToolContext, type AgentToolResult, type AgentToolUpdateCallback, type ToolLoadMode } from "@oh-my-pi/pi-agent-core";
+ import type { Static, TSchema } from "@oh-my-pi/pi-ai";
+ import type { ExtensionRunner } from "./runner.js";
+-import type { ExtensionAgentIdentity, RegisteredTool } from "./types.js";
++import type { ExtensionAgentIdentity, RegisteredTool, ToolResultActionEvent } from "./types.js";
+ /**
+  * Adapts a RegisteredTool into an AgentTool.
+  */
+@@ -18,6 +18,7 @@ export declare class RegisteredToolAdapter implements AgentTool<any, any, any> {
+     strict: boolean;
+     renderCall?: (args: any, options: any, theme: any) => any;
+     renderResult?: (result: any, options: any, theme: any, args?: any) => any;
++    onResultAction: ((event: ToolResultActionEvent<any, any>) => void | Promise<void>) | undefined;
+     readonly loadMode: ToolLoadMode;
+     constructor(registeredTool: RegisteredTool, runner: ExtensionRunner);
+     execute(toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: AgentToolUpdateCallback<any>, context?: AgentToolContext): Promise<AgentToolResult<unknown, unknown>>;
+diff --git a/dist/types/mcp/tool-bridge.d.ts b/dist/types/mcp/tool-bridge.d.ts
+index d5d678e62521197d79b3b5a6b74a1883b20a35cc..8d233d1be3699b569a83716c7f423f0ef0f04327 100644
+--- a/dist/types/mcp/tool-bridge.d.ts
++++ b/dist/types/mcp/tool-bridge.d.ts
+@@ -22,6 +22,8 @@ export type MCPReconnect = (options?: {
+  */
+ export type MCPToolCallObserver = (toolCallId: string) => () => Promise<void>;
+ export declare function isRetriableConnectionError(error: unknown): boolean;
++/** Pure outbound preparation shared with reviewers; file-backed URLs still require contextual resolution. */
++export declare function normalizeMcpOutboundArguments(params: unknown, inputSchema: MCPToolDefinition["inputSchema"]): Record<string, unknown>;
+ /** Minimum spacing between one call's progress updates; a burst coalesces to its newest progress. */
+ export declare const PROGRESS_UPDATE_INTERVAL_MS = 50;
+ /**
+diff --git a/dist/types/session/agent-session.d.ts b/dist/types/session/agent-session.d.ts
+index 4eba4f731550ea1c948e5d7af41508da3d700b27..c5fd50bba4faed0469bdd4ed70f5636da1dc940c 100644
+--- a/dist/types/session/agent-session.d.ts
++++ b/dist/types/session/agent-session.d.ts
+@@ -1324,6 +1324,8 @@ export declare class AgentSession implements SettingsScope, AgentViewSession {
+     }): Promise<{
+         switched: boolean;
+     }>;
++    /** Atomically select a session-only model at true idle; cancellable before commit. */
++    setModelWhenIdle(model: Model, options?: { thinkingLevel?: ConfiguredThinkingLevel; signal?: AbortSignal }): Promise<boolean>;
+     /** Selects a model for this session without updating persisted model settings. */
+     setModelTemporary(model: Model, thinkingLevel?: ConfiguredThinkingLevel, options?: {
+         ephemeral?: boolean;
+diff --git a/dist/types/tools/ask.d.ts b/dist/types/tools/ask.d.ts
+index 0b5e34fb59befab4b671aa7dfb3d1042c1ddcc7c..b9360c679ae91ead62f340aa1dd95811be8654ac 100644
+--- a/dist/types/tools/ask.d.ts
++++ b/dist/types/tools/ask.d.ts
+@@ -11,7 +11,7 @@
+ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+ import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+ import type { ToolSession } from "./index.js";
+-declare const askSchema: import("@oh-my-pi/omptype").FluentType<{
++export declare const askSchema: import("@oh-my-pi/omptype").FluentType<{
+     html: string;
+ }, {
+     html: string;
+diff --git a/src/extensibility/extensions/compact-handler.ts b/src/extensibility/extensions/compact-handler.ts
+index 17b57c71b94e86b09b1953e9b5f6fa1d3e8bdfb7..5a487c62c060e5ed2310be906903c45cce201d9e 100644
+--- a/src/extensibility/extensions/compact-handler.ts
++++ b/src/extensibility/extensions/compact-handler.ts
+@@ -24,7 +24,7 @@ export async function runExtensionCompact(
+ 
+ interface SetModelCapableSession {
+ 	modelRegistry: { getApiKey(model: Model): Promise<string | undefined> };
+-	setModel(model: Model): Promise<unknown>;
++	setModel(model: Model, role?: string): Promise<unknown>;
+ }
+ 
+ /**
+@@ -32,9 +32,13 @@ interface SetModelCapableSession {
+  *
+  * Returns false when no API key is available for the requested model.
+  */
+-export async function runExtensionSetModel(session: SetModelCapableSession, model: Model): Promise<boolean> {
++export async function runExtensionSetModel(
++	session: SetModelCapableSession,
++	model: Model,
++	role?: string,
++): Promise<boolean> {
+ 	const key = await session.modelRegistry.getApiKey(model);
+ 	if (!key) return false;
+-	await session.setModel(model);
++	await session.setModel(model, role);
+ 	return true;
+ }
+diff --git a/src/extensibility/extensions/loader.ts b/src/extensibility/extensions/loader.ts
+index 525ccaf2ce49f73c1d876b3b2a244b7452d5333b..100c3fee4df386269ee57e784bc44104b0e512e6 100644
+--- a/src/extensibility/extensions/loader.ts
++++ b/src/extensibility/extensions/loader.ts
+@@ -169,10 +169,12 @@ export class ExtensionRuntime implements IExtensionRuntime {
+ 		throw new ExtensionRuntimeNotInitializedError();
+ 	}
+ 
+-	setModel(): Promise<boolean> {
++	setModel(_model: Model, _role?: string): Promise<boolean> {
+ 		throw new ExtensionRuntimeNotInitializedError();
+ 	}
+ 
++	setModelWhenIdle: ExtensionAPI["setModelWhenIdle"];
++
+ 	getThinkingLevel(): ThinkingLevel {
+ 		throw new ExtensionRuntimeNotInitializedError();
+ 	}
+@@ -404,8 +406,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+ 		return this.runtime.getCommands();
+ 	}
+ 
+-	setModel(model: Model): Promise<boolean> {
+-		return this.runtime.setModel(model);
++	setModel(model: Model, role?: string): Promise<boolean> {
++		return this.runtime.setModel(model, role);
++	}
++
++	get setModelWhenIdle(): ExtensionAPI["setModelWhenIdle"] {
++		return this.runtime.setModelWhenIdle;
+ 	}
+ 
+ 	getThinkingLevel(): ThinkingLevel | undefined {
+diff --git a/src/extensibility/extensions/runner.ts b/src/extensibility/extensions/runner.ts
+index 35e569e580a098149bb65ac9afcf07633646d7fe..6bf4183d3f165907906fa8ce10d9e7cd9cc326da 100644
+--- a/src/extensibility/extensions/runner.ts
++++ b/src/extensibility/extensions/runner.ts
+@@ -15,6 +15,7 @@ import type {
+ 	AssistantMessage,
+ 	CredentialDisabledEvent,
+ 	ImageContent,
++	Judge,
+ 	Model,
+ 	ProviderResponseMetadata,
+ 	TextContent,
+@@ -617,6 +618,7 @@ export class ExtensionRunner {
+ 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
+ 	#getSystemPromptFn: () => string[] = () => [];
+ 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
++	#createJudge?: (toolName: string) => Judge;
+ 	#startLiveFn?: ExtensionContextActions["startLive"];
+ 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
+ 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
+@@ -933,6 +935,7 @@ export class ExtensionRunner {
+ 		};
+ 		this.runtime.getCommands = actions.getCommands;
+ 		this.runtime.setModel = actions.setModel;
++		this.runtime.setModelWhenIdle = actions.setModelWhenIdle;
+ 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
+ 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
+ 		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
+@@ -1769,6 +1772,11 @@ export class ExtensionRunner {
+ 		return withActiveSettings(this.settings, fn);
+ 	}
+ 
++	/** Bind the session-owned judge without exposing its ledger or cost gate to extensions. */
++	setJudgeFactory(createJudge: (toolName: string) => Judge): void {
++		this.#createJudge = createJudge;
++	}
++
+ 	/**
+ 	 * Creates an extension context, optionally scoped to a provider request model.
+ 	 *
+@@ -1787,6 +1795,8 @@ export class ExtensionRunner {
+ 		model?: Model,
+ 		delegation?: {
+ 			toolName: string;
++			/** Set by the registered tool adapter; closed when execute settles. */
++			closed?: boolean;
+ 			depth?: number;
+ 			context?: AgentToolContext;
+ 			signal?: AbortSignal;
+@@ -1795,6 +1805,9 @@ export class ExtensionRunner {
+ 		agent: ExtensionAgentIdentity = this.agent,
+ 	): ExtensionContext {
+ 		const getModel = model ? () => model : this.#getModel;
++		const createJudge = this.#createJudge;
++		const sessionId = this.sessionId;
++		let judge: Judge | undefined;
+ 		const runEphemeralTurn = this.#runEphemeralTurnFn;
+ 		const createAnnotations = this.#createAnnotations;
+ 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
+@@ -1817,6 +1830,17 @@ export class ExtensionRunner {
+ 				return getModel();
+ 			},
+ 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
++			judge: async (request, options) => {
++				if (!delegation || delegation.closed !== false || !createJudge || this.sessionId !== sessionId) {
++					throw new Error("ctx.judge is only available during an active registered tool execution.");
++				}
++				judge ??= createJudge(delegation.toolName);
++				const signal =
++					options?.signal && delegation.signal
++						? AbortSignal.any([options.signal, delegation.signal])
++						: options?.signal ?? delegation.signal;
++				return judge.judge(request, { ...options, signal });
++			},
+ 			isIdle: () => this.#isIdleFn(),
+ 			abort: () => this.#abortFn(),
+ 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
+@@ -2472,7 +2496,7 @@ export class ExtensionRunner {
+ 
+ 		for (const ext of this.extensions) {
+ 			for (const handler of ext.handlers.get("input") ?? []) {
+-				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
++				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source, originalText: text };
+ 				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs)) as
+ 					| InputEventResult
+ 					| undefined;
+diff --git a/src/extensibility/extensions/types.ts b/src/extensibility/extensions/types.ts
+index f87d7a5c1885688242db248fb3a933be79f3dd6e..e8826536f52f23414ed0014b3600097106529f88 100644
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -54,6 +54,7 @@ import type {
+ 	AssistantMessageEventStream,
+ 	Context,
+ 	ImageContent,
++	Judge,
+ 	Model,
+ 	ModelSpec,
+ 	ProviderResponseMetadata,
+@@ -821,6 +822,12 @@ export interface ExtensionContext {
+ 	model: Model | undefined;
+ 	/** Read-only model query facade: list / current / resolve / family. */
+ 	models: ExtensionModelQuery;
++	/**
++	 * Run the host's native judge-role chain during this registered tool's execution.
++	 * Inherits tool cancellation, cost gate, usage journal and telemetry; purpose is
++	 * host-attributed to `extension:<toolName>`. Rejects outside an active tool call.
++	 */
++	judge: Judge["judge"];
+ 	/** Whether the agent is idle (not streaming) */
+ 	isIdle(): boolean;
+ 	/** Abort the current agent operation */
+@@ -1020,6 +1027,14 @@ export interface ToolShellEnvironmentContext {
+ /** Supplies environment values for a user-initiated shell invocation. */
+ export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
+ 
++/** A human action on this tool's settled result, including restored history. */
++export interface ToolResultActionEvent<TParams extends TSchema = TSchema, TDetails = unknown> {
++	action: string;
++	toolCallId: string;
++	args: Static<TParams>;
++	result: AgentToolResult<TDetails>;
++}
++
+ /**
+  * Tool definition for registerTool().
+  */
+@@ -1077,6 +1092,14 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
+ 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
+ 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
+ 
++	/**
++	 * Handle an explicit native result-card action with a fresh host context.
++	 * Restored cards supply their original call id, args and result, so this must
++	 * not rely on an execute-time closure. Not a model-callable execution hook;
++	 * handlers must interpret their own action ids, not execute action strings.
++	 */
++	onResultAction?(event: ToolResultActionEvent<TParams, TDetails>, ctx: ExtensionContext): void | Promise<void>;
++
+ 	/**
+ 	 * Custom rendering for tool call display.
+ 	 *
+@@ -1434,6 +1457,12 @@ export interface UserPythonEvent {
+ export interface InputEvent {
+ 	type: "input";
+ 	text: string;
++	/**
++	 * The text exactly as submitted, before any handler rewrite: every handler in
++	 * the chain sees the same `originalText` even when earlier handlers replaced
++	 * `text`. Audit what the user actually sent through this, never `text`.
++	 */
++	originalText: string;
+ 	images?: ImageContent[];
+ 	source: "interactive" | "rpc" | "extension";
+ }
+@@ -2194,8 +2223,15 @@ export interface ExtensionAPI {
+ 	/** Get available slash commands in the current session. */
+ 	getCommands(): SlashCommandInfo[];
+ 
+-	/** Set the current model. Returns false if no API key available. */
+-	setModel(model: Model): Promise<boolean>;
++	/**
++	 * Set the session model. An explicit role retains its configured fallback plan;
++	 * omitting it selects a concrete model. Never persists global settings.
++	 * Returns false if no API key is available.
++	 */
++	setModel(model: Model, role?: string): Promise<boolean>;
++
++	/** Atomically select at true native idle; absent when this host does not support it. */
++	setModelWhenIdle?(model: Model, options?: { thinkingLevel?: ConfiguredThinkingLevel; signal?: AbortSignal }): Promise<boolean>;
+ 
+ 	/** Get current thinking level. */
+ 	getThinkingLevel(): ThinkingLevel | undefined;
+@@ -2428,7 +2464,8 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
+ 
+ export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
+ 
+-export type SetModelHandler = (model: Model) => Promise<boolean>;
++export type SetModelHandler = (model: Model, role?: string) => Promise<boolean>;
++export type SetModelWhenIdleHandler = NonNullable<ExtensionAPI["setModelWhenIdle"]>;
+ 
+ export type GetThinkingLevelHandler = () => ThinkingLevel | undefined;
+ 
+@@ -2462,6 +2499,7 @@ export interface ExtensionActions {
+ 	setActiveTools: SetActiveToolsHandler;
+ 	getCommands: GetCommandsHandler;
+ 	setModel: SetModelHandler;
++	setModelWhenIdle?: SetModelWhenIdleHandler;
+ 	getThinkingLevel: GetThinkingLevelHandler;
+ 	setThinkingLevel: SetThinkingLevelHandler;
+ 	getServiceTiers?: GetServiceTiersHandler;
+diff --git a/src/extensibility/extensions/wrapper.ts b/src/extensibility/extensions/wrapper.ts
+index d8cc7e737d2729c23afe001b8f33e57447b3f2df..fa3ba79c81bf81a8463778530f3cabeb02ae8105 100644
+--- a/src/extensibility/extensions/wrapper.ts
++++ b/src/extensibility/extensions/wrapper.ts
+@@ -30,7 +30,7 @@ import { withFileMutationSession } from "../../tools/file-write-fallback";
+ import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+ import { applyToolProxy } from "../tool-proxy";
+ import type { ExtensionRunner } from "./runner";
+-import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
++import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult, ToolResultActionEvent } from "./types";
+ 
+ /**
+  * Second `renderCall` argument that satisfies both the omp and the upstream-pi
+@@ -80,6 +80,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 
+ 	renderCall?: (args: any, options: any, theme: any) => any;
+ 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
++	onResultAction: ((event: ToolResultActionEvent<any, any>) => void | Promise<void>) | undefined = undefined;
+ 	readonly loadMode: ToolLoadMode;
+ 
+ 	constructor(
+@@ -110,6 +111,14 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 					args,
+ 				);
+ 		}
++		if (registeredTool.definition.onResultAction) {
++			// Resolve the context at click time, not execute time: history cards never
++			// execute here, and the runner may have moved or rebound its host UI.
++			this.onResultAction = event =>
++				this.runner.runScoped(() =>
++					registeredTool.definition.onResultAction!(event, this.runner.createContext()),
++				);
++		}
+ 	}
+ 
+ 	async execute(
+@@ -125,18 +134,24 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
+ 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
+ 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
+ 		// aborted, and still streams native progress.
+-		return this.registeredTool.definition.execute(
+-			toolCallId,
+-			params,
++		const delegation = {
++			toolName: this.registeredTool.definition.name,
++			context,
+ 			signal,
+ 			onUpdate,
+-			this.runner.createContext(undefined, {
+-				toolName: this.registeredTool.definition.name,
+-				context,
++			closed: false,
++		};
++		try {
++			return await this.registeredTool.definition.execute(
++				toolCallId,
++				params,
+ 				signal,
+ 				onUpdate,
+-			}),
+-		);
++				this.runner.createContext(undefined, delegation),
++			);
++		} finally {
++			delegation.closed = true;
++		}
+ 	}
+ }
+ 
+diff --git a/src/mcp/tool-bridge.ts b/src/mcp/tool-bridge.ts
+index 4365e2d796fd93a47677d94a77b05a57e394fac4..3686740dacb747d874301b88463e51c71844c14a 100644
+--- a/src/mcp/tool-bridge.ts
++++ b/src/mcp/tool-bridge.ts
+@@ -145,6 +145,14 @@ function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["i
+ 	return rest;
+ }
+ 
++/** Pure outbound preparation shared with reviewers; file-backed URLs still require contextual resolution. */
++export function normalizeMcpOutboundArguments(
++	params: unknown,
++	inputSchema: MCPToolDefinition["inputSchema"],
++): Record<string, unknown> {
++	return omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
++}
++
+ /** Replace string args that are file-backed internal URLs with the local path backing them. */
+ async function resolveOutboundUrlArgs(
+ 	value: unknown,
+@@ -207,7 +215,7 @@ async function prepareOutboundArgs(
+ 	inputSchema: MCPToolDefinition["inputSchema"],
+ 	context: CustomToolContext,
+ ): Promise<MCPToolArgs> {
+-	const args = omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
++	const args = normalizeMcpOutboundArguments(params, inputSchema);
+ 	return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
+ }
+ 
+diff --git a/src/modes/acp/acp-agent.ts b/src/modes/acp/acp-agent.ts
+index b31c8d67e4f2b9f33926250ba812266663cdca69..a7f59a5c4898117a2dc09b32c21c3d15760e6a77 100644
+--- a/src/modes/acp/acp-agent.ts
++++ b/src/modes/acp/acp-agent.ts
+@@ -3334,14 +3334,15 @@ export class AcpAgent implements Agent {
+ 				getAllTools: () => record.session.getAllToolInfos(),
+ 				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
+ 				getCommands: () => getSessionSlashCommands(record.session),
+-				setModel: async model => {
++				setModel: async (model, role) => {
+ 					const apiKey = await record.session.modelRegistry.getApiKey(model);
+ 					if (!apiKey) {
+ 						return false;
+ 					}
+-					await record.session.setModel(model);
++					await record.session.setModel(model, role);
+ 					return true;
+ 				},
++				setModelWhenIdle: (model, options) => record.session.setModelWhenIdle(model, options),
+ 				getThinkingLevel: () => record.session.thinkingLevel,
+ 				setThinkingLevel: level => record.session.setThinkingLevel(level),
+ 				getServiceTiers: () => record.session.serviceTierByFamily,
+diff --git a/src/modes/controllers/extension-ui-controller.ts b/src/modes/controllers/extension-ui-controller.ts
+index 76b1fac7bafe5ba6a5e8c64722f953df69e2cad7..35e682c592ccf1e6c3aba240ce7222c68b538956 100644
+--- a/src/modes/controllers/extension-ui-controller.ts
++++ b/src/modes/controllers/extension-ui-controller.ts
+@@ -284,12 +284,13 @@ export class ExtensionUiController {
+ 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
+ 			getAllTools: () => this.ctx.session.getAllToolInfos(),
+ 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
+-			setModel: async model => {
++			setModel: async (model, role) => {
+ 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
+ 				if (!key) return false;
+-				await this.ctx.session.setModel(model);
++				await this.ctx.session.setModel(model, role);
+ 				return true;
+ 			},
++			setModelWhenIdle: (model, options) => this.ctx.session.setModelWhenIdle(model, options),
+ 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
+ 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
+ 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
+@@ -509,12 +510,13 @@ export class ExtensionUiController {
+ 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
+ 			getAllTools: () => this.ctx.session.getAllToolInfos(),
+ 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
+-			setModel: async model => {
++			setModel: async (model, role) => {
+ 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
+ 				if (!key) return false;
+-				await this.ctx.session.setModel(model);
++				await this.ctx.session.setModel(model, role);
+ 				return true;
+ 			},
++			setModelWhenIdle: (model, options) => this.ctx.session.setModelWhenIdle(model, options),
+ 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
+ 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
+ 			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
+diff --git a/src/modes/interactive-mode.ts b/src/modes/interactive-mode.ts
+index bc8a4bf4c8236c74b77a7ae5ae248c79c8cd7233..5c3125a391bcf3205e4d0d74b064777e33594be4 100644
+--- a/src/modes/interactive-mode.ts
++++ b/src/modes/interactive-mode.ts
+@@ -3945,7 +3945,15 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		const transition = this.#planSessionModeTransition(request);
+ 		if (transition === undefined) return { ok: true, changed: false, state: this.#getSessionModeState() };
+ 		if (typeof transition !== "function") return refuse(transition.code, transition.message);
+-		if (this.session.isBusyForSnapshot) {
++		const busyBlocked =
++			request.mode === "goal" || request.mode === "loop"
++				? this.session.isCompacting ||
++					this.session.isBackgroundCompacting ||
++					this.session.isBashRunning ||
++					this.session.isEvalRunning ||
++					this.session.isRetrying
++				: this.session.isBusyForSnapshot;
++		if (busyBlocked) {
+ 			return refuse("busy", "The session is busy with a turn or compaction; retry once it is idle.");
+ 		}
+ 		const before = JSON.stringify(this.#getSessionModeState());
+@@ -3957,6 +3965,10 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			this.#modeSetInFlight = false;
+ 			hold[Symbol.dispose]();
+ 		}
++		if (!this.session.isStreaming && this.onInputCallback) {
++			this.#scheduleLoopAutoSubmit();
++			this.#scheduleGoalContinuation();
++		}
+ 		const state = this.#getSessionModeState();
+ 		return { ok: true, changed: JSON.stringify(state) !== before, state };
+ 	}
+@@ -4020,7 +4032,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 						}
+ 						if (planBlocks) return conflict("plan");
+ 						if (this.vibeModeEnabled) return conflict("vibe");
+-						return () => this.#enterGoalMode({ objective, tokenBudget: budget });
++						return () => this.#enterGoalMode({ objective, tokenBudget: budget, deliverAs: "aside" });
+ 					}
+ 					case "pause":
+ 						if (this.goalModeEnabled) return () => this.#pauseGoalAction();
+@@ -4031,7 +4043,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 						if (!cfgGoalEnabled.get(this.session.settings)) {
+ 							return { code: "disabled", message: "Goal mode is disabled in settings (goal.enabled)." };
+ 						}
+-						return () => this.#enterGoalMode({ resume: true });
++						return () => this.#enterGoalMode({ resume: true, deliverAs: "aside" });
+ 					case "drop":
+ 						if (!goalBlocks) return undefined;
+ 						return async () => {
+@@ -6493,6 +6505,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		tokenBudget?: number;
+ 		resume?: boolean;
+ 		silent?: boolean;
++		deliverAs?: "steer" | "aside";
+ 	}): Promise<void> {
+ 		using _hold = this.#holdModeChanges();
+ 		if (this.goalModeEnabled) {
+@@ -6537,7 +6550,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		this.#resetGoalContinuationSuppression();
+ 		this.#updateGoalModeStatus();
+ 		if (this.session.isStreaming) {
+-			await this.session.sendGoalModeContext({ deliverAs: "steer" });
++			await this.session.sendGoalModeContext({ deliverAs: options.deliverAs ?? "steer" });
+ 		}
+ 		if (!options.silent) {
+ 			this.showStatus(options.resume ? "Goal mode resumed." : "Goal mode enabled.");
+diff --git a/src/modes/runtime-init.ts b/src/modes/runtime-init.ts
+index a798abf594bf429f24483a19a2a2845124b29fdf..5a1b0b7a30675dcd3b19333bb0ccb47935adcd3c 100644
+--- a/src/modes/runtime-init.ts
++++ b/src/modes/runtime-init.ts
+@@ -129,7 +129,8 @@ export async function initializeExtensions(session: AgentSession, options: Initi
+ 			setActiveTools: (toolNames: string[]) =>
+ 				session.setActiveToolsByName(filterActiveTools ? filterActiveTools(toolNames) : toolNames),
+ 			getCommands: () => getSessionSlashCommands(session),
+-			setModel: model => runExtensionSetModel(session, model),
++			setModel: (model, role) => runExtensionSetModel(session, model, role),
++			setModelWhenIdle: (model, options) => session.setModelWhenIdle(model, options),
+ 			getThinkingLevel: () => session.thinkingLevel,
+ 			setThinkingLevel: level => session.setThinkingLevel(level),
+ 			getServiceTiers: () => session.serviceTierByFamily,
+diff --git a/src/session/agent-session.ts b/src/session/agent-session.ts
+index 7bb1aec8308370e92450c87c102fbbe2cab4d90a..482039cdc6f7a6081bec6fc387c0eeb92f330938 100644
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -1461,6 +1461,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
+ 	#admittedSubmissionCount = 0;
+ 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
++	/** An idle selection owns admission until auth, metadata, journal and sync settle. */
++	#idleModelSelection: PromiseWithResolvers<void> | undefined;
++	readonly #idleModelRequests = new Set<AbortController>();
++	#modelIdleChanged: PromiseWithResolvers<void> | undefined;
++	#inFlightSettlingCount = 0;
+ 	#promptGeneration = 0;
+ 	// abort() can finish in a message_end listener before queued settle work runs.
+ 	#activeAgentPromptGeneration = this.#promptGeneration;
+@@ -1600,6 +1605,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		return this.#inFlightEpoch;
+ 	}
+ 
++	#notifyModelIdleChanged(): void {
++		const changed = this.#modelIdleChanged;
++		this.#modelIdleChanged = undefined;
++		changed?.resolve();
++	}
++
+ 	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
+ 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
+ 		// Abort has already taken an earlier epoch's bracket out of the count, so its late finalizer leaves the
+@@ -1607,6 +1618,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		// finishing has its bracket reset by it and ends here.
+ 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+ 		if (this.#promptInFlightCount !== 0) return;
++		this.#notifyModelIdleChanged();
+ 		this.yieldQueue.requestIdleFlush();
+ 		this.#releasePowerAssertion();
+ 		this.#endComputerTurn();
+@@ -1685,12 +1697,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	async #flushInFlightSettledCallbacks(): Promise<void> {
+ 		const callbacks = this.#inFlightSettledCallbacks;
+ 		this.#inFlightSettledCallbacks = [];
+-		for (const callback of callbacks) {
+-			try {
+-				await callback();
+-			} catch (error) {
+-				logger.warn("In-flight settle callback failed", { error: String(error) });
++		this.#inFlightSettlingCount++;
++		try {
++			for (const callback of callbacks) {
++				try { await callback(); }
++				catch (error) { logger.warn("In-flight settle callback failed", { error: String(error) }); }
+ 			}
++		} finally {
++			this.#inFlightSettlingCount--;
++			this.#notifyModelIdleChanged();
+ 		}
+ 	}
+ 
+@@ -1863,6 +1878,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			}
+ 			return;
+ 		}
++		// Keep synchronous wake admission: while model selection owns the idle
++		// barrier, native asides retain these records for its release drain (or
++		// the existing session-transition cleanup), not a detached late wake.
++		if (this.#idleModelSelection) {
++			this.#irc.queueAside(wakeRecords);
++			return;
++		}
+ 		// Compaction replaces history without this wake owning the turn. Wait without
+ 		// claiming the session, then decide afresh; the records remain in this closure.
+ 		const contextReplacement = this.#maintenance.waitForContextReplacement();
+@@ -2436,6 +2458,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		this.#promptTemplates = config.promptTemplates ?? [];
+ 		this.#slashCommands = config.slashCommands ?? [];
+ 		this.#extensionRunner = config.extensionRunner;
++		this.#extensionRunner?.setJudgeFactory(toolName =>
++			resolveJudge({
++				settings: this.settings,
++				registry: this.#modelRegistry,
++				sessionModel: this.model,
++				sessionId: this.sessionId,
++				purpose: `extension:${toolName}`,
++				onUsage: journalJudgmentUsage(this.sessionManager),
++				telemetry: this.agent.telemetry,
++				cache: sharedJudgmentCache(),
++				costGate: this.#costGate,
++			}),
++		);
+ 		this.#cacheWarmer = config.cacheWarmer;
+ 		if (config.cacheWarmer) {
+ 			const warmer = config.cacheWarmer;
+@@ -2653,6 +2688,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 						? this.#startTurnObservation(messages)
+ 						: undefined;
+ 				let turnError: unknown;
++				while (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 				const inFlightEpoch = this.#beginInFlight();
+ 				try {
+ 					await this.agent.prompt(messages.length === 1 ? first : messages);
+@@ -4002,6 +4038,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	}
+ 
+ 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
++		while (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		this.#admittedSubmissionCount++;
+ 		try {
+ 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+@@ -4013,6 +4050,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 				this.#admittedSubmissionsSettled = undefined;
+ 				settled.resolve();
+ 			}
++			this.#notifyModelIdleChanged();
+ 		}
+ 	}
+ 
+@@ -4146,6 +4184,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 
+ 	/** Emit an event to all listeners */
+ 	#emit(event: AgentSessionEvent): void {
++		this.#notifyModelIdleChanged();
+ 		// Listener array is copy-on-write (see `subscribe`), so iterating the
+ 		// current array is safe against (un)subscribes made by a listener.
+ 		for (const l of this.#eventListeners) {
+@@ -5886,6 +5925,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 					}
+ 				}
+ 
++				while (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 				const inFlightEpoch = this.#beginInFlight();
+ 				const coalescedSources = new Set([options.source]);
+ 				let observation: TurnObservation | undefined;
+@@ -6748,6 +6788,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	}
+ 
+ 	#beginSessionTransition(): Disposable {
++		for (const request of this.#idleModelRequests) request.abort();
+ 		// Before anything awaits: a reload keeps the session id, so only the transition itself can supersede
+ 		// a pending idle check or an in-flight recap that belong to the transcript being replaced.
+ 		this.#idleMaintenance?.invalidate();
+@@ -7039,6 +7080,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 */
+ 	beginDispose(): void {
+ 		this.#isDisposed = true;
++		for (const request of this.#idleModelRequests) request.abort();
+ 		for (const dispose of this.#disposers.splice(0)) dispose();
+ 		if (this.#runActive) this.#closeRun();
+ 		this.#modelDiscoveryAbortController.abort();
+@@ -7207,6 +7249,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 
+ 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+ 		this.beginDispose();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		// Stop cache warming before the drain windows below: an armed tick firing
+ 		// mid-dispose would issue a paid warm request and persist usage into the
+ 		// closing session writer.
+@@ -7451,6 +7494,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const queued = this.#enterSessionTransition(() => this.resetSessionContext());
+ 		if (queued) return queued;
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		// Refuse while a response streams OR a foreground user bash/python
+ 		// execution is in flight: those complete via recordBashResult()/
+ 		// recordPythonResult(), which append directly to agent.state when not
+@@ -7708,7 +7752,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 
+ 	/** Whether agent is currently streaming a response */
+ 	get isStreaming(): boolean {
+-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
++		return this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#idleModelSelection !== undefined;
+ 	}
+ 
+ 	/** Transcript epoch: advances on `/clear` and `/new`, never when resuming an existing session. */
+@@ -9953,6 +9997,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		// every pre-dispatch bail (generation bump from abort, disposal, usage
+ 		// preflight denial) exits silently, and prompt() uses the outcome to hand
+ 		// the typed text back to the host instead of losing it.
++		while (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		const inFlightEpoch = this.#beginInFlight();
+ 		// Client ownership is reserved by #prompt before dispatch preprocessing
+ 		// and released when its bracket settles; callers that reach this
+@@ -10350,6 +10395,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			},
+ 			getSystemPrompt: () => this.systemPrompt,
+ 			runEphemeralTurn: args => this.runEphemeralTurn(args),
++			judge: async () => {
++				throw new Error("ctx.judge is only available during an active registered tool execution.");
++			},
+ 			// The SDK always builds a runner (which receives the annotations factory); this runner-less
+ 			// context only exists for directly constructed sessions, which have no `/annotate` wiring.
+ 			annotations: UNAVAILABLE_ANNOTATIONS,
+@@ -11232,6 +11280,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		message: CustomMessage,
+ 		options?: { acceptTerminalEmptyStop?: boolean },
+ 	): Promise<boolean> {
++		while (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		const inFlightEpoch = this.#beginInFlight();
+ 		const sessionGeneration = this.#sessionGeneration;
+ 		const setupAbort = new AbortController();
+@@ -12864,6 +12913,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const queued = this.#enterSessionTransition(() => this.newSession(options));
+ 		if (queued) return queued;
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		this.#assertVibeSessionTransitionAllowed("start a new session");
+ 		const previousSessionFile = this.sessionFile;
+ 
+@@ -13026,6 +13076,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const queued = this.#enterSessionTransition(() => this.fork(entryId, options));
+ 		if (queued) return queued;
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		this.#assertVibeSessionTransitionAllowed("fork the session");
+ 		const requireIdleFor = entryId !== undefined || options?.requireIdle ? "fork the session" : undefined;
+ 		if (entryId !== undefined) {
+@@ -13190,6 +13241,86 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		return this.#models.setModel(model, role, options);
+ 	}
+ 
++	/**
++	 * Select a concrete session-only model at true idle, reserving native admission
++	 * across credential and metadata refresh. Existing generations are never aborted.
++	 * Cancellation/session replacement before commit leaves model and journal untouched.
++	 * Call outside lifecycle hooks awaited by an active turn.
++	 */
++	async setModelWhenIdle(
++		model: Model,
++		options?: { thinkingLevel?: ConfiguredThinkingLevel; signal?: AbortSignal },
++	): Promise<boolean> {
++		const generation = this.#sessionGeneration;
++		const sessionId = this.sessionManager.getSessionId();
++		const sessionFile = this.sessionManager.getSessionFile();
++		const cwd = this.sessionManager.getCwd();
++		const controller = new AbortController();
++		this.#idleModelRequests.add(controller);
++		const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
++		const cancelled = Promise.withResolvers<never>();
++		const onAbort = () => cancelled.reject(signal.reason ?? new Error("Idle model selection cancelled"));
++		// A cancellation may arrive while only native settlement (not auth) is awaited.
++		// Attach before starting either wait, and remove it once this operation settles.
++		signal.addEventListener("abort", onAbort, { once: true });
++		void cancelled.promise.catch(() => {});
++		const assertCurrent = () => {
++			signal.throwIfAborted();
++			if (this.#isDisposed || this.#sessionGeneration !== generation ||
++				this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getSessionFile() !== sessionFile ||
++				this.sessionManager.getCwd() !== cwd) {
++				throw new Error("Idle model selection target retired");
++			}
++		};
++		let reservation: PromiseWithResolvers<void> | undefined;
++		try {
++			for (;;) {
++				assertCurrent();
++				const changed = this.#modelIdleChanged ??= Promise.withResolvers<void>();
++				await Promise.race([this.waitForIdle(), cancelled.promise]);
++				assertCurrent();
++				if (!this.isStreaming && !this.hasAdmittedSubmission && !this.isSessionTransitioning &&
++					!this.isCompacting && !this.isBackgroundCompacting && this.#inFlightSettlingCount === 0 &&
++					!this.#queuedMessageDrainScheduled &&
++					!(this.agent.hasQueuedMessages() && !this.#queuedMessageDrainBlocked &&
++						this.#modeExitDrainSuppressionDepth === 0 && this.#canAutoContinueForFollowUp()) &&
++					!(this.#irc.hasPending() && !this.#advisors.autoResumeSuppressed && !this.#planModeState?.enabled) &&
++					!this.#idleModelSelection) break;
++				// The same native admission, settle and lifecycle machinery wakes this
++				// check after setup, stranded drains and continuations; never agent_end alone.
++				await Promise.race([changed.promise, cancelled.promise]);
++			}
++			// No await between the native busy check and claiming prompt admission.
++			reservation = Promise.withResolvers<void>();
++			this.#idleModelSelection = reservation;
++			await Promise.race([this.modelRegistry.refreshIfStale(), cancelled.promise]);
++			assertCurrent();
++			const selected = this.modelRegistry.getAvailable().find(candidate =>
++				candidate.provider === model.provider && candidate.id === model.id);
++			if (!selected) throw new Error("Idle model selection target unavailable");
++			const key = await Promise.race([this.modelRegistry.getApiKey(selected, sessionId, { signal }), cancelled.promise]);
++			assertCurrent();
++			if (!key) return false;
++			await this.#models.setModel(selected, undefined, {
++				thinkingLevel: options?.thinkingLevel,
++				beforeCommit: assertCurrent,
++				signal,
++			});
++			await this.sessionManager.flush();
++			return true;
++		} finally {
++			signal.removeEventListener("abort", onAbort);
++			this.#idleModelRequests.delete(controller);
++			if (reservation) {
++				this.#idleModelSelection = undefined;
++				reservation.resolve();
++				this.yieldQueue.requestIdleFlush();
++				this.#notifyModelIdleChanged();
++				this.#drainStrandedQueuedMessages();
++			}
++		}
++	}
++
+ 	/** Selects a model for this session without updating persisted model settings. */
+ 	async setModelTemporary(
+ 		model: Model,
+@@ -14620,6 +14751,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
+ 		}
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		const previousSessionFile = this.sessionManager.getSessionFile();
+ 		const switchingToDifferentSession = previousSessionFile
+ 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
+@@ -15070,6 +15202,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const queued = this.#enterSessionTransition(() => this.branch(entryId));
+ 		if (queued) return queued;
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		const selectedEntry = this.sessionManager.getEntry(entryId);
+ 
+ 		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
+@@ -15215,6 +15348,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		);
+ 		if (queued) return queued;
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		const previousSessionFile = this.sessionFile;
+ 		if (!this.sessionManager.getSessionFile()) {
+ 			throw new Error("Cannot branch /btw: session is not persisted");
+@@ -15381,6 +15515,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		const queued = this.#enterSessionTransition(() => this.navigateTree(targetId, options));
+ 		if (queued) return queued;
+ 		using _transition = this.#beginSessionTransition();
++		if (this.#idleModelSelection) await this.#idleModelSelection.promise;
+ 		await this.#bash.flushPending();
+ 		this.#flushExcludedRows();
+ 		const oldLeafId = this.sessionManager.getLeafId();
+diff --git a/src/tools/ask.ts b/src/tools/ask.ts
+index 5da5bdd6d71d9be984a56dde97f32630a9456e7c..272ba234a4ca7244f4a5f705266f4dad16c76e84 100644
+--- a/src/tools/ask.ts
++++ b/src/tools/ask.ts
+@@ -72,7 +72,7 @@ const INVALID_ASK_ERROR = "Error: ask takes one `html` string holding a <form>."
+ // the deadline but never invoke `onTimeout`). Cancels beyond it are user Esc.
+ const TIMEOUT_DETECTION_TOLERANCE_MS = 1_000;
+ 
+-const askSchema = arkType({
++export const askSchema = arkType({
+ 	html: arkType("string").describe("one HTML <form>"),
+ });
+ 

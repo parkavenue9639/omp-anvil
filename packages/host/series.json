@@ -1,0 +1,22 @@
+{
+	"$comment": "Host patch series: features apply in this order on the pristine upstream packages. Generate the Bun patches with `bun run host:build`; never edit patches/*.patch by hand.",
+	"version": "19.0.1",
+	"scope": "@oh-my-pi",
+	"packages": ["pi-coding-agent", "pi-ai", "pi-tui", "pi-utils"],
+	"features": [
+		"fixes",
+		"startup",
+		"extension-api",
+		"approval-review",
+		"role-plans",
+		"scenario-roles",
+		"managed-presets",
+		"memory-routing",
+		"message-converters",
+		"thinking-state",
+		"extension-completion",
+		"executor-session-lifecycle",
+		"subagent-context",
+		"frontend-engineer"
+	]
+}

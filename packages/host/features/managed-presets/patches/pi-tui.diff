@@ -1,0 +1,159 @@
+diff --git a/dist/types/overlays/agents-hub.d.ts b/dist/types/overlays/agents-hub.d.ts
+index 379224abc634d6e961f1a8fb4e5b0bb5f278841a..23952ca2e1b2f8c7078e0a5e81fd4ab3dcdfacb1 100644
+--- a/dist/types/overlays/agents-hub.d.ts
++++ b/dist/types/overlays/agents-hub.d.ts
+@@ -45,6 +45,8 @@ export interface AgentsHubDeps {
+     loadAgents: () => Promise<HubAgent[]>;
+     getAvailableModels: () => Model[];
+     effectiveModelPatterns: (agent: HubAgent) => string[];
++    /** Defined for role-only agents; entries are selectors, not synthetic models. */
++    modelRoleChoices?: (agent: HubAgent) => readonly string[] | undefined;
+     resolvePatterns: (patterns: string[]) => string | undefined;
+     effectivePrewalkPattern: (agent: HubAgent) => string | undefined;
+     effectiveAdvisorPattern: (agent: HubAgent) => string | undefined;
+diff --git a/dist/types/overlays/model-picker.d.ts b/dist/types/overlays/model-picker.d.ts
+index 89bdc77a7bc85aa4a6850445709909ce9a1f6f18..ba4238f3a29bfb756e21de13630c602fab078f10 100644
+--- a/dist/types/overlays/model-picker.d.ts
++++ b/dist/types/overlays/model-picker.d.ts
+@@ -40,6 +40,8 @@ export interface ModelPickerCallbacks {
+      * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
+      */
+     onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
++    /** Host-owned task role editor, replacing concrete task-model mode when present. */
++    onEditTask?: () => void;
+     /** The picker was dismissed. */
+     onCancel: () => void;
+ }
+diff --git a/src/overlays/agents-hub.ts b/src/overlays/agents-hub.ts
+index 8026389796b1a7b261438ec6c8f9a0cc29fb220e..49c074b7df56a63f1f0caa15e373ecd8196b8f39 100644
+--- a/src/overlays/agents-hub.ts
++++ b/src/overlays/agents-hub.ts
+@@ -123,6 +123,8 @@ export interface AgentsHubDeps {
+ 	loadAgents: () => Promise<HubAgent[]>;
+ 	getAvailableModels: () => Model[];
+ 	effectiveModelPatterns: (agent: HubAgent) => string[];
++	/** Defined for role-only agents; entries are selectors, not synthetic models. */
++	modelRoleChoices?: (agent: HubAgent) => readonly string[] | undefined;
+ 	resolvePatterns: (patterns: string[]) => string | undefined;
+ 	effectivePrewalkPattern: (agent: HubAgent) => string | undefined;
+ 	effectiveAdvisorPattern: (agent: HubAgent) => string | undefined;
+@@ -415,8 +417,15 @@ export class AgentsHubComponent implements Component {
+ 		}
+ 	}
+ 
+-	#setOverride(agent: HubAgent, property: PropertyKind, value: string | undefined): void {
++	#setOverride(agent: HubAgent, property: PropertyKind, value: string | undefined): boolean {
+ 		const trimmed = value?.trim() || undefined;
++		try {
++			this.#deps.setAgentOverride(property, agent.name, trimmed);
++		} catch (error) {
++			this.#notice = error instanceof Error ? error.message : String(error);
++			this.#requestRender();
++			return false;
++		}
+ 		switch (property) {
+ 			case "model":
+ 				agent.overrideModel = trimmed;
+@@ -428,9 +437,9 @@ export class AgentsHubComponent implements Component {
+ 				agent.advisorOverride = trimmed;
+ 				break;
+ 		}
+-		this.#deps.setAgentOverride(property, agent.name, trimmed);
+ 		this.#notice = this.#describeProperty(agent, property);
+ 		this.#requestRender();
++		return true;
+ 	}
+ 
+ 	/** One-line effective description used for notices and the status row. */
+@@ -503,7 +512,26 @@ export class AgentsHubComponent implements Component {
+ 		const chips: StripChip[] = [];
+ 		const mark = (label: string, active: boolean, color: "accent" | "muted" = "muted"): string =>
+ 			active ? theme.fg("accent", `${theme.status.enabled} ${label}`) : theme.fg(color, label);
+-		if (property === "model") {
++		const roles = property === "model" ? this.#deps.modelRoleChoices?.(agent) : undefined;
++		if (roles !== undefined) {
++			chips.push({
++				label: "agent default",
++				styled: mark("agent default", current === undefined),
++				action: { kind: "set", property, value: undefined },
++			});
++			for (const role of roles) {
++				chips.push({
++					label: role,
++					styled: mark(role, current === role.toLowerCase()),
++					action: { kind: "set", property, value: role },
++				});
++			}
++			chips.push({
++				label: "@role…",
++				styled: theme.fg("muted", "@role…"),
++				action: { kind: "pattern", property },
++			});
++		} else if (property === "model") {
+ 			chips.push({
+ 				label: "pick model…",
+ 				styled: theme.fg("accent", "pick model…"),
+@@ -578,8 +606,7 @@ export class AgentsHubComponent implements Component {
+ 				this.#openPropertyStrip(strip.agent, action.property);
+ 				return;
+ 			case "set":
+-				this.#setOverride(strip.agent, action.property, action.value);
+-				this.#closeStrip();
++				if (this.#setOverride(strip.agent, action.property, action.value)) this.#closeStrip();
+ 				return;
+ 			case "pick":
+ 				this.#closeStrip();
+@@ -594,8 +621,7 @@ export class AgentsHubComponent implements Component {
+ 	#submitPattern(): void {
+ 		const strip = this.#strip;
+ 		if (strip?.kind !== "pattern") return;
+-		this.#setOverride(strip.agent, strip.property, strip.input.getValue());
+-		this.#closeStrip();
++		if (this.#setOverride(strip.agent, strip.property, strip.input.getValue())) this.#closeStrip();
+ 	}
+ 
+ 	// ═══════════════════════════════════════════════════════════════════════
+diff --git a/src/overlays/model-picker.ts b/src/overlays/model-picker.ts
+index 5807409833e16d8f413094bdae45077013ab7391..69db9c209fc82c00f560f86110e8acb4866cbd28 100644
+--- a/src/overlays/model-picker.ts
++++ b/src/overlays/model-picker.ts
+@@ -71,6 +71,8 @@ export interface ModelPickerCallbacks {
+ 	 * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
+ 	 */
+ 	onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
++	/** Host-owned task role editor, replacing concrete task-model mode when present. */
++	onEditTask?: () => void;
+ 	/** The picker was dismissed. */
+ 	onCancel: () => void;
+ }
+@@ -221,6 +223,8 @@ export class ModelPickerComponent implements Component {
+ 	#scopeItems: { source: ModelBrowserItem[]; scope: string; items: ModelBrowserItem[] } | undefined;
+ 	#scopes: { source: ModelBrowserItem[]; value: TspPickerScope[] } | undefined;
+ 	#level: { key: string; value: TspPickerLevel } | undefined;
++	#selectOnly: boolean;
++	#onEditTask?: () => void;
+ 	#nativeRoot: { memo: string; node: NativeNode } | undefined;
+ 	#pickerRoot:
+ 		| {
+@@ -249,7 +253,9 @@ export class ModelPickerComponent implements Component {
+ 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
+ 		this.#taskSelector = options.taskSelector;
+ 		this.#thinkingLevelFor = options.thinkingLevelFor;
+-		if (callbacks.onPickTask) {
++		this.#selectOnly = options.selectOnly === true;
++		this.#onEditTask = callbacks.onEditTask;
++		if (!this.#selectOnly && (callbacks.onPickTask || callbacks.onEditTask)) {
+ 			this.#taskModeKey = options.taskModeKeys?.[0];
+ 			for (const key of options.taskModeKeys ?? []) addKeyAliases(this.#taskMatchKeys, key);
+ 		}
+@@ -519,6 +525,10 @@ export class ModelPickerComponent implements Component {
+ 	}
+ 	/** Flip between session-model and Task-subagent targets, repointing the highlight. */
+ 	#toggleTaskMode(): void {
++		if (this.#onEditTask) {
++			this.#onEditTask();
++			return;
++		}
+ 		this.#taskMode = !this.#taskMode;
+ 		this.#syncItemsForQuery(this.#browser.query, true);
+ 		const target = this.#taskMode ? this.#taskSelector : this.#currentSelector;

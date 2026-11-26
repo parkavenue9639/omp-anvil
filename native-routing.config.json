@@ -70,7 +70,8 @@
   "task": {
     "eager": "preferred",
     "enableEffort": true,
-    "showResolvedModelBadge": true
+    "showResolvedModelBadge": true,
+    "disabledAgents": ["sonic", "reviewer", "security-reviewer"]
   },
   "retry": {
     "enabled": true,

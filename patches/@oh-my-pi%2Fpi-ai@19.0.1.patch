@@ -1,0 +1,106 @@
+diff --git a/src/providers/devin.ts b/src/providers/devin.ts
+index fed3ef39c3a5a6e16920d60bfa8de53cba91c049..76f160096f1e1cb08047bb270434dc6d2c19cfdf 100644
+--- a/src/providers/devin.ts
++++ b/src/providers/devin.ts
+@@ -33,6 +33,7 @@ import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/w
+ import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
+ import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
+ import * as AIError from "../error";
++import { jwtExpiryMs } from "../registry/engine/common";
+ import { parseToolCallArguments } from "../utils/tool-call-arguments";
+ 
+ import type {
+@@ -85,6 +86,20 @@ const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+ const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
+ const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
+ 
++// Auth metadata is process-local and credential-scoped; never retain opaque JWTs.
++const DEVIN_AUTH_TTL_MS = 5 * 60_000;
++const DEVIN_AUTH_EXPIRY_SKEW_MS = 60_000;
++const DEVIN_AUTH_CACHE_CAPACITY = 32;
++interface DevinAuthMetadata {
++	userJwt: string;
++	baseUrl?: string;
++}
++const devinAuthCache = new Map<string, { metadata: DevinAuthMetadata; expiresAt: number }>();
++
++function devinAuthCacheKey(apiKey: string | undefined, baseUrl: string): string {
++	return JSON.stringify([baseUrl, devinCliMetadata(apiKey).apiKey]);
++}
++
+ /** Off the event loop: a synchronous gzip stalls the TUI on a multi-MB transcript. */
+ const gzipAsync = promisify(gzip);
+ 
+@@ -301,6 +316,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
+ 			});
+ 
+ 			if (!response.ok) {
++				if (response.status === 401 || response.status === 403) {
++					devinAuthCache.delete(devinAuthCacheKey(options?.apiKey, baseUrl));
++				}
+ 				const payload = new Uint8Array(await response.arrayBuffer());
+ 				throw createDevinHttpError("API", response, payload);
+ 			}
+@@ -334,6 +352,10 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
+ 						const trailerBytes = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
+ 						const trailerError = readConnectTrailerError(trailerBytes.toString("utf8").trim());
+ 						if (trailerError) {
++							const code = trailerError.code.toLowerCase();
++							if (code === "unauthenticated" || code === "permission_denied") {
++								devinAuthCache.delete(devinAuthCacheKey(options?.apiKey, baseUrl));
++							}
+ 							// #4218: these rejections carry no HTTP error body, so the raw
+ 							// trailer is the only server-side evidence. Log it with the
+ 							// request shape before classification discards it.
+@@ -569,7 +591,15 @@ async function fetchDevinAuthMetadata(
+ 	baseUrl: string,
+ 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
+ 	signal: AbortSignal | undefined,
+-): Promise<{ userJwt: string; baseUrl?: string }> {
++): Promise<DevinAuthMetadata> {
++	signal?.throwIfAborted();
++	const cacheKey = devinAuthCacheKey(apiKey, baseUrl);
++	const now = Date.now();
++	for (const [key, entry] of devinAuthCache) {
++		if (entry.expiresAt <= now) devinAuthCache.delete(key);
++	}
++	const cached = devinAuthCache.get(cacheKey);
++	if (cached) return cached.metadata;
+ 	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
+ 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
+ 		method: "POST",
+@@ -581,8 +611,11 @@ async function fetchDevinAuthMetadata(
+ 		body: toBinary(GetUserJwtRequestSchema, request),
+ 		signal,
+ 	});
++	if (response.status === 401 || response.status === 403) devinAuthCache.delete(cacheKey);
+ 	const payload = new Uint8Array(await response.arrayBuffer());
+-	if (!response.ok) throw createDevinHttpError("auth", response, payload);
++	if (!response.ok) {
++		throw createDevinHttpError("auth", response, payload);
++	}
+ 	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, payload);
+ 	if (!decoded?.userJwt) {
+ 		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
+@@ -591,7 +624,20 @@ async function fetchDevinAuthMetadata(
+ 		});
+ 	}
+ 	const customBaseUrl = decoded.customApiServerUrl.trim();
+-	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
++	const metadata = { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
++	signal?.throwIfAborted();
++	const receivedAt = Date.now();
++	const jwtExpiry = jwtExpiryMs(decoded.userJwt, DEVIN_AUTH_EXPIRY_SKEW_MS);
++	if (jwtExpiry !== undefined && Number.isFinite(jwtExpiry) && jwtExpiry > receivedAt) {
++		if (!devinAuthCache.has(cacheKey) && devinAuthCache.size >= DEVIN_AUTH_CACHE_CAPACITY) {
++			devinAuthCache.delete(devinAuthCache.keys().next().value!);
++		}
++		devinAuthCache.set(cacheKey, {
++			metadata,
++			expiresAt: Math.min(jwtExpiry, receivedAt + DEVIN_AUTH_TTL_MS),
++		});
++	}
++	return metadata;
+ }
+ 
+ /**

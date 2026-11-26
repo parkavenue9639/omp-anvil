@@ -1,0 +1,273 @@
+diff --git a/dist/types/cli/startup-prepaint.d.ts b/dist/types/cli/startup-prepaint.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce42cbd49521a0042b7ac9c1f10ee747f2662c04
+--- /dev/null
++++ b/dist/types/cli/startup-prepaint.d.ts
+@@ -0,0 +1,2 @@
++/** Only known, message-free interactive launches may acquire speculative stdin. */
++export declare function isStartupPrepaintSafe(argv: readonly string[]): boolean;
+diff --git a/dist/types/config/startup-model-discovery.d.ts b/dist/types/config/startup-model-discovery.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0daba02f01bc4defefb1d30648f5684b2edcd980
+--- /dev/null
++++ b/dist/types/config/startup-model-discovery.d.ts
+@@ -0,0 +1,4 @@
++import type { ModelRegistry } from "./model-registry";
++import type { Settings } from "./settings";
++/** Retry unresolved startup selectors without waiting for unrelated provider catalogs. */
++export declare function resolveStartupModelWithDiscovery(modelRegistry: ModelRegistry, selectors: readonly string[], settings: Settings, resolve: () => number | undefined | Promise<number | undefined>): Promise<boolean>;
+diff --git a/src/cli.ts b/src/cli.ts
+index f744fbbe6fac79d5ecbd8107e07a5cf37cfc1f40..6d948cb5ac12d3f0c57deca5912df89c4dbf6089 100755
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -37,6 +37,7 @@ import {
+ import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
+ import { isNativeShell, runNativeShell } from "./cli/native-shell";
+ import { extractProfileFlags } from "./cli/profile-bootstrap";
++import { isStartupPrepaintSafe } from "./cli/startup-prepaint";
+ import {
+ 	AUTO_UPDATE_WORKER_ARG,
+ 	COMPUTER_WORKER_ARG,
+@@ -83,26 +84,6 @@ function getWorkerParentPort(): MessagePort | null {
+ 	return workerThreads.parentPort;
+ }
+ 
+-/**
+- * Launch flags that only switch off discovery or persistence. An argv made of
+- * these still enters interactive mode, so the speculative first frame is
+- * valid; anything else (subcommands, `-p`, model/session selectors) skips it.
+- */
+-const PREPAINT_SAFE_FLAGS: Record<string, true> = {
+-	"--no-session": true,
+-	"--no-extensions": true,
+-	"--no-skills": true,
+-	"--no-rules": true,
+-	"--no-context-files": true,
+-	"--no-tools": true,
+-	"--no-judge": true,
+-	"--no-spotlight": true,
+-	"--offline": true,
+-	"--no-lsp": true,
+-	"--no-title": true,
+-	"--no-prewalk": true,
+-	"--no-pty": true,
+-};
+ 
+ /** Complete the OS-visible process-name setup after speculative first paint. */
+ async function setFullProcessName(): Promise<void> {
+@@ -549,7 +530,7 @@ export async function runCli(argv: string[]): Promise<void> {
+ 		!process.env.PI_TIMING &&
+ 		process.stdin.isTTY === true &&
+ 		process.stdout.isTTY === true &&
+-		resolvedArgv.every(arg => PREPAINT_SAFE_FLAGS[arg] === true)
++		isStartupPrepaintSafe(resolvedArgv)
+ 	) {
+ 		// Intentional exception to the static-import convention: this latency boundary
+ 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
+@@ -562,14 +543,14 @@ export async function runCli(argv: string[]): Promise<void> {
+ 	// The speculative composer owns stdin before either loader yields, so input
+ 	// typed during initialization stays buffered. Neither graph is needed to
+ 	// produce that frame.
+-	await Promise.all([setFullProcessName(), helpOrVersion ? Promise.resolve() : installNetworkBootstrap()]);
++	try {
++		await Promise.all([setFullProcessName(), helpOrVersion ? Promise.resolve() : installNetworkBootstrap()]);
+ 
+-	if (resolvedArgv[0] === "--smoke-test") {
+-		await runSmokeTest();
+-		return;
+-	}
++		if (resolvedArgv[0] === "--smoke-test") {
++			await runSmokeTest();
++			return;
++		}
+ 
+-	try {
+ 		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+ 			import("@oh-my-pi/pi-utils/cli"),
+ 			import("./cli-commands"),
+diff --git a/src/cli/startup-prepaint.ts b/src/cli/startup-prepaint.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e7928c73427e928964d458b3f0ab453c48b2c8b
+--- /dev/null
++++ b/src/cli/startup-prepaint.ts
+@@ -0,0 +1,31 @@
++import { isAbsolute } from "node:path";
++
++const SAFE_SWITCHES: Record<string, true> = {
++	"--no-session": true,
++	"--no-extensions": true,
++	"--no-skills": true,
++	"--no-rules": true,
++	"--no-context-files": true,
++	"--no-tools": true,
++	"--no-lsp": true,
++	"--no-title": true,
++	"--no-prewalk": true,
++	"--no-pty": true,
++};
++
++/** Only known, message-free interactive launches may acquire speculative stdin. */
++export function isStartupPrepaintSafe(argv: readonly string[]): boolean {
++	for (let index = 0; index < argv.length; index++) {
++		const argument = argv[index];
++		if (SAFE_SWITCHES[argument] === true) continue;
++		const equals = argument.indexOf("=");
++		const flag = equals < 0 ? argument : argument.slice(0, equals);
++		if (flag !== "--config" && flag !== "--trusted-extension") return false;
++		const value = equals < 0 ? argv[++index] : argument.slice(equals + 1);
++		// Do not swallow a mode switch, separator, or malformed value. Full CLI
++		// validation (and trusted-extension loading) still runs before activation.
++		if (!value || value.startsWith("-")) return false;
++		if (flag === "--trusted-extension" && !isAbsolute(value)) return false;
++	}
++	return true;
++}
+diff --git a/src/config/model-registry.ts b/src/config/model-registry.ts
+index c75b1633a6395e513194625857f6fd217d5e2364..3f3eb0f654e9c70c9d42c0fee39312d08f43bf52 100644
+--- a/src/config/model-registry.ts
++++ b/src/config/model-registry.ts
+@@ -3978,7 +3978,7 @@ export class ModelRegistry {
+ 			.map(provider => provider.provider);
+ 	}
+ 
+-	/** Canonical id of a configured or extension-backed discovery provider. */
++	/** Canonical id of a built-in, configured, or extension discovery provider. */
+ 	getDiscoveryProviderId(requestedId: string): string | undefined {
+ 		const normalized = requestedId.toLowerCase();
+ 		for (const { provider } of this.#discoverableProviders) {
+@@ -3987,6 +3987,9 @@ export class ModelRegistry {
+ 		for (const provider of this.#runtimeModelManagers.keys()) {
+ 			if (provider.toLowerCase() === normalized) return provider;
+ 		}
++		for (const provider of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
++			if (provider.toLowerCase() === normalized) return provider;
++		}
+ 		return undefined;
+ 	}
+ 
+diff --git a/src/config/startup-model-discovery.ts b/src/config/startup-model-discovery.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..33f3bb4ede6fde4ace75e4ee41f7ed93ccb54d18
+--- /dev/null
++++ b/src/config/startup-model-discovery.ts
+@@ -0,0 +1,40 @@
++import type { ModelRegistry } from "./model-registry";
++import { disabledProviderIds, resolveConfiguredModelPatterns, sessionModelDiscoveryProviders } from "./model-resolver";
++import type { Settings } from "./settings";
++
++/** Retry unresolved startup selectors without waiting for unrelated provider catalogs. */
++export async function resolveStartupModelWithDiscovery(
++	modelRegistry: ModelRegistry,
++	selectors: readonly string[],
++	settings: Settings,
++	// Index in the expanded selectors, from the caller's native resolver.
++	resolve: () => number | undefined | Promise<number | undefined>,
++): Promise<boolean> {
++	const patterns = resolveConfiguredModelPatterns([...selectors], settings);
++	let matchedIndex = await resolve();
++	const disabled = disabledProviderIds(settings);
++	for (let index = 0; index < patterns.length; index++) {
++		// A cached later match does not settle earlier, still-cold candidates.
++		if (matchedIndex !== undefined && index >= matchedIndex) return true;
++		const pattern = patterns[index];
++		const slash = pattern.indexOf("/");
++		const provider = slash < 0 ? undefined : modelRegistry.getDiscoveryProviderId(pattern.slice(0, slash));
++		if (!provider) {
++			// A slash may belong to a bare model id (org/model), not a provider.
++			await modelRegistry.refresh("online-if-uncached");
++			return (await resolve()) !== undefined;
++		}
++		const providers = sessionModelDiscoveryProviders(modelRegistry, [pattern], disabled);
++		if (providers.size === 0) continue;
++		await modelRegistry.refreshDiscoverableProviders(providers, "online-if-uncached");
++		matchedIndex = await resolve();
++		if (matchedIndex === undefined || matchedIndex > index) {
++			// Even a known prefix can be another provider's literal model id.
++			// Exhaust native cross-provider lookup before accepting a later
++			// candidate or falling back. A successful scoped match skips this.
++			await modelRegistry.refresh("online-if-uncached");
++			return (await resolve()) !== undefined;
++		}
++	}
++	return matchedIndex !== undefined;
++}
+diff --git a/src/sdk.ts b/src/sdk.ts
+index 9b3f393f0f755e999cf01781961c0d17a97aa28c..f49c802cc71ad79729b9b5ec38e0f6dcec8d131c 100644
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -93,6 +93,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
+ import { buildServiceTierByFamily } from "./config/service-tier";
+ import { bindEffects, combine } from "./config/registry";
+ import { Settings } from "./config/settings";
++import { resolveStartupModelWithDiscovery } from "./config/startup-model-discovery";
+ import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
+ import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+ import { daemonMutex } from "./daemon/modules/mutex";
+@@ -3294,9 +3295,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		// the background.
+ 		await modelRegistry.refreshRuntimeProviders("offline");
+ 		// Online runtime discovery must not steal the event loop from the first UI
+-		// frame. Explicit deferred model selectors still start it immediately
+-		// because they await it below; normal UI startup receives a one-shot
+-		// starter in CreateAgentSessionResult and calls it after mode.init paints.
++		// frame. Required startup selectors receive a scoped retry below; other
++		// catalogs use the one-shot starter after mode.init paints (or after
++		// headless session initialization finishes).
+ 		let runtimeDiscoveryPromise: Promise<void> | undefined;
+ 		const startRuntimeDiscovery = (): Promise<void> => {
+ 			runtimeDiscoveryPromise ??= modelRegistry.refreshRuntimeProviders().catch(error => {
+@@ -3306,9 +3307,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			});
+ 			return runtimeDiscoveryPromise;
+ 		};
+-		if (!options.hasUI || deferredModelPatterns.length > 0) {
+-			void startRuntimeDiscovery();
+-		}
+ 
+ 		// Retry session-model candidates now that extension providers are
+ 		// registered. The initial restore runs before extensions load, so a role
+@@ -3375,20 +3373,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		// registered. Use the same CLI resolver as the immediate path so bare role
+ 		// names, exact model names, and provider selectors keep one precedence rule.
+ 		if (!model && deferredModelPatterns.length > 0) {
+-			// Deferred `--model` patterns almost always failed at the immediate
+-			// path (main.ts:881) precisely because discovery-backed providers
+-			// hadn't populated yet. Await the in-flight runtime discovery
+-			// already kicked off above (stash + reuse avoids a second concurrent
+-			// `#refreshRuntimeDiscoveries` pass for the same runtime model
+-			// managers; it resolves instantly when no runtime managers are
+-			// registered). `refreshRuntimeProviders()` only covers runtime model
+-			// managers, not config-discovery providers (e.g. user-configured
+-			// ollama); fall back to a full cache-aware refresh only when the
+-			// runtime pass didn't surface a match AND config-discovery providers
+-			// exist to fetch from. By then runtime managers short-circuit on the
+-			// fresh cache written by the awaited pass, closing the double-fetch
+-			// window.
+-			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
++			// Retry only the providers named by the requested selectors. Other
++			// extension catalogs remain on the post-first-frame background path.
+ 			const matchPreferences = getModelMatchPreferences(settings);
+ 			const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+ 			const runtimeResolved = deferredModelPatterns.some(pattern =>
+@@ -3413,12 +3399,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					return resolved.model !== undefined && !disabledProviders.has(resolved.model.provider);
+ 				}),
+ 			);
+-			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
+-				await logger.time("resolveModelDiscoveryFallbackNonRuntime", () =>
+-					modelRegistry.refresh("online-if-uncached"),
+-				);
+-			}
+-			const allEnabledModels =
++			let allEnabledModels =
+ 				disabledProviders.size === 0
+ 					? modelRegistry.getAll()
+ 					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
+@@ -6507,6 +6488,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			});
+ 		}
+ 		startDeferredMCPDiscovery?.(session);
++		if (!options.hasUI) void startRuntimeDiscovery();
+ 
+ 		startupCleanup.move();
+ 		return {
