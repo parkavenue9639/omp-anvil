@@ -10,9 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="packages/host/series.json"><img src="https://img.shields.io/badge/Oh_My_Pi-19.0.1-9a4f29?style=flat-square" alt="Upstream baseline: Oh My Pi 19.0.1"></a>
-  <a href="https://bun.sh/"><img src="https://img.shields.io/badge/Bun-1.4.4%2B-563d52?style=flat-square" alt="Bun 1.4.4 or newer"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-286749?style=flat-square" alt="MIT license"></a>
+  <a href="packages/host/series.json"><kbd>Oh My Pi 19.0.1</kbd></a> ·
+  <a href="https://bun.sh/"><kbd>Bun ≥ 1.4.4</kbd></a> ·
+  <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
 <p align="center">
