@@ -4,9 +4,9 @@
 
 <h1 align="center">OMP Anvil</h1>
 
-<p align="center"><strong>Delegate by role. Review risky actions. Remember what matters.</strong></p>
+<p align="center"><strong>Keep your planning agent. Let LCP do the work.</strong></p>
 <p align="center">
-  An independent <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> distribution with specialist subagents, role-based model fallback, Risk Guard host hooks, and classified memory.
+  The open-source <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> worker host for LCP's local execution layer.
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <p align="center">
+  <a href="#the-lcp-workflow">LCP workflow</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#risk-guard-tool-approval">Risk Guard</a> ·
   <a href="#classified-memory">Classified memory</a> ·
@@ -25,11 +26,20 @@
   <a href="#community-and-feedback">Community</a>
 </p>
 
-Anvil is for developers who want to run a coding agent across projects without giving every subagent the same job or every project the same memory. It builds on OMP's terminal UI, tools, and native subagents by patching the host itself, not by adding a separate task scheduler.
+## The LCP workflow
+
+**Discuss the plan in Claude Code or agy (Antigravity). Hand off execution to LCP.** The goal is to keep the planning conversation in your existing client instead of switching to another coding agent or driving each worker yourself.
+
+1. **Planning client:** Agree on the goal, scope, and what counts as done in Claude Code or agy.
+2. **Thin local Router:** Turn the agreed plan into a task for LCP. Route back questions that need your decision and results that need your review. The Router doesn't implement the task.
+3. **LCP Worker:** Use the model providers you configure locally. Pick models and fallbacks by role, delegate independent work to specialist subagents when useful, and carry out and verify the task within the agreed scope. Provider configuration and execution belong to LCP, not the planning client.
+
+> [!IMPORTANT]
+> **What you can install from this repository:** Anvil is the open-source OMP host used by LCP Workers. It includes role-based model fallback, specialist subagents, Risk Guard's approval hooks, and opt-in classified memory. It runs standalone for trying those capabilities. The full LCP Workbench (Router, task engine, and Worker coordination) is not bundled, and this checkout does not connect to Claude Code or agy. The workflow above is the product direction, not the install instructions below.
 
 ## Quick start
 
-You'll need **Bun 1.4.4 or newer** and Git:
+To try the **Anvil worker host on its own**, you'll need Bun 1.4.4 or newer and Git:
 
 ```sh
 git clone https://github.com/parkavenue9639/omp-anvil.git
@@ -93,9 +103,6 @@ Routing is off by default. Merge these settings into the local `native-routing.c
 ### Auditable, reproducible host patches
 
 Anvil pins **OMP 19.0.1** and applies an ordered patch series to the upstream release packages. You can inspect each change, rebuild the Bun install patches, and reconcile the changes against a newer upstream release without maintaining a full copy of the upstream source.
-
-> [!NOTE]
-> Anvil is maintained independently and distributed from source. It does not require an existing LCP installation and does not include Workbench or personal deployment data.
 
 ## Patch catalog
 

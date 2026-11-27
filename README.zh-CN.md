@@ -4,9 +4,9 @@
 
 <h1 align="center">OMP Anvil</h1>
 
-<p align="center"><strong>按角色委派，按风险审查，按项目留存记忆。</strong></p>
+<p align="center"><strong>方案还在你熟悉的客户端聊，执行交给 LCP。</strong></p>
 <p align="center">
-  独立的 <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> 发行版，提供专用子 agent、角色模型回退、Risk Guard 宿主接口与分类记忆。
+  LCP 本地执行层的开源 Worker 宿主，基于 <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a>。
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 
 <p align="center">
+  <a href="#lcp-工作流">LCP 工作流</a> ·
   <a href="#快速上手">快速上手</a> ·
   <a href="#risk-guard-工具审批">Risk Guard</a> ·
   <a href="#分类记忆">分类记忆</a> ·
@@ -25,11 +26,20 @@
   <a href="#社区与反馈">社区</a>
 </p>
 
-Anvil 面向需要长期维护编码 agent 的开发者：把实现和审查交给不同专长的子 agent，让受信扩展接入原生工具审批，只将适合长期保留的事实写入对应记忆库。它直接修改 OMP 宿主，不是在上面再套一层任务调度器。
+## LCP 工作流
+
+**你在 Claude Code 或 agy（Antigravity）里聊方案，LCP 在本地接手执行。** 目标是保留你习惯的对话入口，不用换到另一个编码 Agent，也不用逐个给 Worker 派活。
+
+1. **方案端**：在 Claude Code 或 agy 里确定目标、范围和怎样才算完成。
+2. **本地薄 Router**：把约定好的方案交成 LCP 工单，把需要你拍板的问题和需要审阅的结果带回来；Router 不负责实现。
+3. **LCP Worker**：接入你在本地配置的模型提供商，按角色选模型和回退链，适合拆分时委派给专用子 agent，并在约定范围内完成任务和验证。模型配置和实际执行归 LCP，不要求方案端替 Worker 调模型。
+
+> [!IMPORTANT]
+> **当前从本仓能安装的是 Anvil 宿主。** 它是 LCP Worker 使用的开源 OMP 宿主，包含角色模型回退、专用子 agent、Risk Guard 审批接口和按需开启的分类记忆，也可以独立运行来试用这些能力。本仓不随附完整 LCP Workbench（Router、工单引擎与 Worker 调度），也不提供 Claude Code / agy 接入。上面是产品目标工作流，不是下面的安装步骤。
 
 ## 快速上手
 
-需要 **Bun 1.4.4 或更高版本**和 Git。在仓库根目录运行：
+要**单独试用 Anvil Worker 宿主**，需要 Bun 1.4.4 或更高版本和 Git：
 
 ```sh
 git clone https://github.com/parkavenue9639/omp-anvil.git
@@ -93,9 +103,6 @@ Anvil 随宿主交付 Risk Guard 所用的 [`approval-review` 补丁](packages/h
 ### 可审查、可重建的宿主补丁
 
 Anvil 固定上游 **OMP 19.0.1**，在官方发行包上按顺序应用补丁。你可以看清每项宿主改动、按原顺序重建 Bun 安装补丁，也能在升级上游时逐项核对差异，无须维护一份完整的上游源码副本。
-
-> [!NOTE]
-> Anvil 独立于上游维护，当前从源码分发，无须本机已有的 LCP 二进制。本仓不包含 Workbench 或个人部署数据。
 
 ## 补丁目录
 
