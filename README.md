@@ -4,9 +4,9 @@
 
 <h1 align="center">OMP Anvil</h1>
 
-<p align="center"><strong>Give each coding task the right agent and model.</strong></p>
+<p align="center"><strong>Delegate by role. Review risky actions. Remember what matters.</strong></p>
 <p align="center">
-  An independent <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> distribution for role-based model routing, specialist subagents, and auditable host patches.
+  An independent <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> distribution with specialist subagents, role-based model fallback, Risk Guard host hooks, and classified memory.
 </p>
 
 <p align="center">
@@ -15,18 +15,21 @@
   <a href="LICENSE"><kbd>MIT</kbd></a>
 </p>
 
+<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+
 <p align="center">
-  <a href="#快速上手">Quick start</a> ·
-  <a href="#anvil-改了什么">Highlights</a> ·
-  <a href="#补丁目录">Patch catalog</a> ·
-  <a href="#社区与反馈">Community</a>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#risk-guard-tool-approval">Risk Guard</a> ·
+  <a href="#classified-memory">Classified memory</a> ·
+  <a href="#patch-catalog">Patch catalog</a> ·
+  <a href="#community-and-feedback">Community</a>
 </p>
 
-**任务交给专长不同的子 agent，模型和备用方案交给角色配置。** Anvil 是面向日常工程协作的独立 OMP 衍生发行版。它在 OMP 原生的子 agent、工具和终端界面之上定制宿主行为，而不是再加一层任务调度器，也不是一套模型配置。
+Anvil is for developers who want to run a coding agent across projects without giving every subagent the same job or every project the same memory. It builds on OMP's terminal UI, tools, and native subagents by patching the host itself, not by adding a separate task scheduler.
 
-## 快速上手
+## Quick start
 
-需要 **Bun 1.4.4 或更高版本**和 Git。在仓库根目录运行：
+You'll need **Bun 1.4.4 or newer** and Git:
 
 ```sh
 git clone https://github.com/parkavenue9639/omp-anvil.git
@@ -35,9 +38,9 @@ bun install --frozen-lockfile --ignore-scripts
 bun run omp:patched --version
 ```
 
-`omp:patched` 从打过补丁的源码启动。上游包的预打包入口 `dist/cli.js` 不会读取这些源码修改。
+`omp:patched` launches the patched source. The upstream prebuilt entry point, `dist/cli.js`, does not pick up these source changes.
 
-首次试用时，将路由模板和委派 skill 复制到隔离目录，不覆盖自己的 OMP 配置：
+Try Anvil with a separate agent directory so you don't overwrite your existing OMP configuration:
 
 ```sh
 export PI_CODING_AGENT_DIR="$PWD/.local/agent"
@@ -46,69 +49,92 @@ cp -R skills/subagent-coordination "$PI_CODING_AGENT_DIR/skills/"
 cp native-routing.config.json "$PI_CODING_AGENT_DIR/"
 ```
 
-在隔离目录里完成认证并编辑 `native-routing.config.json` 副本。`example-provider-N/model-name` 是示例选择器，请在模型列表、角色和回退链中替换为已配置的模型，或移除不用的候选。搜索、图像、语音和决策模型需要相应的供应商能力。自定义 provider 可参考 [`examples/models.yml`](examples/models.yml)，将密钥通过本机环境注入，不写进模板。
+Set up authentication in that directory and edit its copy of `native-routing.config.json`. Replace the `example-provider-N/model-name` placeholders in enabled models, role bindings, and fallback chains, or remove entries you won't use. Search, image, speech, and decision models need providers with the corresponding capabilities. See [`examples/models.yml`](examples/models.yml) for custom providers; pass credentials through your local environment rather than adding them to the template.
 
 ```sh
 bun run omp:patched --config "$PI_CODING_AGENT_DIR/native-routing.config.json" --model @default
 ```
 
-受管预设和两份前端 skill 已内置。已有 LCP 启动器的用户也可以使用 [`lcp.json`](lcp.json) 加载同一模板；该文件和 [Codex 账号策略示例](examples/codex-session.config.json) 都不是独立源码入口的前置条件。
+The managed presets and two frontend skills are built in. If you already use the LCP launcher, [`lcp.json`](lcp.json) can load the same template. Neither that file nor the [Codex account-policy example](examples/codex-session.config.json) is required by the standalone source entry point.
 
-## Anvil 改了什么
+## What Anvil adds
 
-### 01 · 让任务选角色，让角色选模型
+### Risk Guard tool approval
 
-代码审查时，`review` 预设绑定 `@review`；前端实现时，`frontend-engineer` 绑定 `@frontend`。模型、推理档位和回退顺序由你为角色配置，换 provider 不必重写预设。推理遇到符合回退策略的故障时，宿主使用该角色的候选链；恢复会话时仍保留原角色计划。标题、空闲回顾和本地记忆也能各用自己的角色。
+Anvil ships the [`approval-review` host patch](packages/host/features/approval-review/) that Risk Guard uses. Trusted extensions can register a reviewer with `pi.registerToolApprovalReviewer` for a tool call that would otherwise prompt a human. It does not override an explicit native allow or deny. Provider safety confirmations still require a human.
 
-### 02 · 子 agent 有分工，委派有边界
+- If every reviewer abstains, OMP prompts as usual. Any denial wins; reviewer errors or timeouts do not grant approval.
+- Approval applies only to the current call and does not persist as an authorization.
 
-内置 **12 个受管预设**，覆盖只读调查、局部修复、复杂实现、独立审查和前端工程。发到同仓的其他 worktree 时，子 agent 从目标检出加载项目规则和技能。配套的 [委派指南](skills/subagent-coordination/) 讲清什么时候该自己做、什么时候该拆任务，以及怎样交接和验收。
+**What's included:** the public distribution ships the reviewer interface and host gate, not LCP's full Risk Guard policy extension. Without a reviewer extension loaded, normal OMP approvals still apply. This is not an operating-system sandbox.
 
-### 03 · 深度定制也能逐项审查和重建
+### Classified memory
 
-Anvil 固定上游 **OMP 19.0.1**，在官方发行包上按顺序应用补丁。你可以看清每项宿主改动、按原顺序重建 Bun 安装补丁，也能在升级上游时逐项核对差异，无须维护一份完整的上游源码副本。
+The [`memory-routing` patch](packages/host/features/memory-routing/) uses a separate, tool-free model call to extract durable facts before writing to Mnemopi. A build convention can stay in the **project bank**, a reusable preference can go to the **global bank**, a one-off detail can be **skipped**, and an uncertain item can go to a **pending queue**. Raw transcripts aren't written directly to the recall banks; this does not change session history.
+
+Routing is off by default. Merge these settings into the local `native-routing.config.json` used in Quick start, and point `modelRoles.memory` at an available model. With Git auto-registration on, sibling worktrees share a project identity. Inspect pending items with `/memory queue`; read-only cross-project recall requires the separate `memoryRouting.crossProjectRead` setting.
+
+```json
+{
+  "memory": { "backend": "mnemopi" },
+  "mnemopi": { "scoping": "per-project-tagged", "llmMode": "none" },
+  "memoryRouting": { "enabled": true, "autoRegisterProjects": true }
+}
+```
+
+### Role-based models and fallback
+
+`review` uses `@review`; `frontend-engineer` uses `@frontend`. Configure models, reasoning effort, and fallback order per role, then change providers without rewriting the presets. When the retry policy calls for fallback, the host uses that role's candidate chain. The plan is preserved on resume. Titles, idle recaps, and local memory processing can each use their own role.
+
+### Specialist subagents and delegation
+
+**12 managed presets** cover read-only investigation, focused fixes, complex implementation, independent review, and frontend engineering. When a subagent is dispatched to another worktree of the same repository, it picks up project instructions, rules, and skills from that checkout. The [delegation guide](skills/subagent-coordination/) covers when to work inline, how to split work, and how to hand off and verify results.
+
+### Auditable, reproducible host patches
+
+Anvil pins **OMP 19.0.1** and applies an ordered patch series to the upstream release packages. You can inspect each change, rebuild the Bun install patches, and reconcile the changes against a newer upstream release without maintaining a full copy of the upstream source.
 
 > [!NOTE]
-> Anvil 独立于上游维护，当前从源码分发，无须本机已有的 LCP 二进制。本仓包含宿主补丁和可复用的定制，不包含 Workbench、Risk Guard 或个人部署数据。
+> Anvil is maintained independently and distributed from source. It does not require an existing LCP installation and does not include Workbench or personal deployment data.
 
-## 补丁目录
+## Patch catalog
 
-以下按 [`series.json`](packages/host/series.json) 的应用顺序列出相对上游 OMP 19.0.1 的变化。标为「扩展接口」的条目是宿主提供的能力，不代表 Anvil 随附了使用这些接口的扩展应用。
+Changes to upstream OMP 19.0.1 are listed in [`series.json`](packages/host/series.json) application order. Extension APIs are capabilities, not bundled applications that use them.
 
-| 补丁 | 具体变化 | 如何生效 |
+| Patch | Change | Activation |
 | --- | --- | --- |
-| [`fixes`](packages/host/features/fixes/) | 修复 Tern 原生卡片读取空文件时的崩溃、Advisor 自动审批的上下文传递，以及自定义配置目录下的数据和缓存定位；缓存有效的 Devin JWT，减少重复鉴权。 | 宿主内置 |
-| [`startup`](packages/host/features/startup/) | 使用 `--config` 或 `--trusted-extension` 时仍可先绘制首屏，等扩展就绪再接收提交；若能识别启动模型所属 provider，只刷新相关模型目录。 | 宿主内置 |
-| [`extension-api`](packages/host/features/extension-api/) | 扩展可调用宿主裁判模型、处理工具结果卡片点击、等会话真正空闲再切换模型，以及获取输入改写前的原文。 | 扩展接口 |
-| [`approval-review`](packages/host/features/approval-review/) | 扩展可审查原本会弹出人工确认的工具调用。原生明确的允许或拒绝不受影响；若审查者都弃权，仍由用户确认。 | 扩展接口 |
-| [`role-plans`](packages/host/features/role-plans/) | 每个 `@role` 拥有自己的有序回退链；别名未配置单独回退时可继承目标角色的链。角色和候选计划随会话保存与恢复。 | 配置 `modelRoles` 与 `retry.fallbackChains` |
-| [`scenario-roles`](packages/host/features/scenario-roles/) | 可给会话标题、空闲回顾和本地记忆处理分配独立角色，避免后台任务借用前台模型。 | 按场景配置 `@title`、`@recap`、`@memory` |
-| [`managed-presets`](packages/host/features/managed-presets/) | 受管子 agent 只绑定一个纯 `@role`，不写死模型或推理档位。在 `/agents` 和 Alt+P 中为受管预设选择角色；限制 `creative` 的工具范围。 | 内置预设和原生界面 |
-| [`memory-routing`](packages/host/features/memory-routing/) | 在 Mnemopi 写入前对候选内容分类，决定写入项目库或全局库、跳过或进入待决队列；支持按权限跨项目只读检索。原始对话不会直接写入召回库。 | `memoryRouting.enabled` 默认关闭；跨项目读取另行启用 |
-| [`message-converters`](packages/host/features/message-converters/) | 扩展可定制自定义消息进入模型上下文时的表示，恢复历史后也适用；不改写原始会话记录。 | 扩展接口 |
-| [`thinking-state`](packages/host/features/thinking-state/) | 扩展能区分用户配置的推理模式、最近一次自动解析结果和当前实际档位；配置的模式可随会话恢复。 | 宿主状态与扩展接口 |
-| [`extension-completion`](packages/host/features/extension-completion/) | 注册工具执行期间可用 `ctx.complete` 向指定模型发起一次无工具推理。请求不带会话历史，不切换主模型，也不走角色回退链。 | 扩展接口 |
-| [`executor-session-lifecycle`](packages/host/features/executor-session-lifecycle/) | `--resume-exact` 先取得写入锁，再打开指定会话。受信扩展可持久化执行器输入、核对处理回执及协调停止，不必靠进程退出状态猜测会话进度。 | 宿主 CLI 与受信扩展接口 |
-| [`subagent-context`](packages/host/features/subagent-context/) | 子 agent 能发现目标检出的项目说明、技能与规则；派发时可通过 `cwd` 绑定当前工作区或同仓的已注册 worktree。明确禁止再次派发的预设不会获得 `task` 工具。 | 子 agent 派发 |
-| [`frontend-engineer`](packages/host/features/frontend-engineer/) | 内置前端工程预设及两份配套技能。前端会话可从父会话继承限定的 Figma / Context7 只读 MCP 方法；不会自动建立连接或授予账号权限。 | 选择 `frontend-engineer` 预设 |
+| [`fixes`](packages/host/features/fixes/) | Fixes empty-file rendering in Tern, approval context for Advisor, and cache and data paths under a custom config directory. Caches valid Devin JWTs to avoid repeated authentication. | Built in |
+| [`startup`](packages/host/features/startup/) | Keeps the fast first frame with `--config` or `--trusted-extension`, while blocking submission until extensions are ready. Refreshes only the relevant catalog when a startup model can be attributed to a provider. | Built in |
+| [`extension-api`](packages/host/features/extension-api/) | Lets extensions call the host judge, handle tool-result card actions, switch models when truly idle, and read the original input before rewriting hooks. | Extension API |
+| [`approval-review`](packages/host/features/approval-review/) | Gives Risk Guard and other trusted reviewers a hook for calls that would otherwise prompt the user. Explicit native decisions stay in place. | Requires a trusted reviewer extension; no policy bundled |
+| [`role-plans`](packages/host/features/role-plans/) | Gives each `@role` its own ordered fallback chain. Aliases can inherit the target chain. Roles and plans persist across session resumes. | Configure `modelRoles` and `retry.fallbackChains` |
+| [`scenario-roles`](packages/host/features/scenario-roles/) | Uses independent roles for titles, idle recaps, and local memory processing rather than borrowing the foreground model. | Configure `@title`, `@recap`, and `@memory` as needed |
+| [`managed-presets`](packages/host/features/managed-presets/) | Binds managed agents to a single `@role` rather than a model ID or effort. Adds role selection to `/agents` and Alt+P, and limits `creative` to its declared tools. | Built-in presets and UI |
+| [`memory-routing`](packages/host/features/memory-routing/) | Classifies Mnemopi writes into project, global, skip, or pending. Keeps raw transcripts out of recall banks and supports optional read-only cross-project recall. | `memoryRouting.enabled` is off by default; cross-project reads are separate |
+| [`message-converters`](packages/host/features/message-converters/) | Lets extensions change how custom messages reach the model, including after history restoration, without rewriting the stored journal. | Extension API |
+| [`thinking-state`](packages/host/features/thinking-state/) | Exposes configured thinking mode, the last automatic resolution, and the effective effort separately. Restores the configured mode on resume. | Host state and extension API |
+| [`extension-completion`](packages/host/features/extension-completion/) | Lets a registered tool make a single tool-free `ctx.complete` call to an exact model. No conversation history, foreground model switch, or role fallback. | Extension API |
+| [`executor-session-lifecycle`](packages/host/features/executor-session-lifecycle/) | `--resume-exact` acquires the writer lease first. Trusted extensions can persist executor inputs, inspect processing receipts, and coordinate shutdown. | Host CLI and trusted extension API |
+| [`subagent-context`](packages/host/features/subagent-context/) | Discovers instructions, skills, and rules from the target checkout. Dispatch can bind `cwd` to the workspace or a registered sibling worktree. Agents that cannot spawn do not receive `task`. | Subagent dispatch |
+| [`frontend-engineer`](packages/host/features/frontend-engineer/) | Adds the managed frontend preset and two bundled skills. It can inherit a limited read-only Figma or Context7 MCP surface from the parent, without creating connections or granting credentials. | Select `frontend-engineer` |
 
-## 仓库结构
+## Repository layout
 
-| 路径 | 用途 |
+| Path | Purpose |
 | --- | --- |
-| [`packages/host/series.json`](packages/host/series.json) | 上游版本固定点与补丁应用顺序 |
-| [`packages/host/features/`](packages/host/features/) | 按宿主特性维护的原始 diff |
-| [`patches/`](patches/) | 由补丁系列生成的四份 Bun 安装补丁 |
-| [`agents/`](agents/) · [`skills/`](skills/) | 角色预设、委派指南与配套技能 |
-| [`native-routing.config.json`](native-routing.config.json) · [`examples/`](examples/) | 可复用配置模板，不含实际账号或私有端点 |
+| [`packages/host/series.json`](packages/host/series.json) | Upstream pin and patch application order |
+| [`packages/host/features/`](packages/host/features/) | Maintained feature diffs |
+| [`patches/`](patches/) | Four generated Bun install patches |
+| [`agents/`](agents/) · [`skills/`](skills/) | Role presets, delegation guide, and supporting skills |
+| [`native-routing.config.json`](native-routing.config.json) · [`examples/`](examples/) | Reusable templates without real accounts or private endpoints |
 
-## 社区与反馈
+## Community and feedback
 
-- **Anvil 的问题和建议**：发到 [Anvil Issues](https://github.com/parkavenue9639/omp-anvil/issues)；提交补丁前可先看 [贡献指南](CONTRIBUTING.md)。
-- **Oh My Pi 上游**：[官网](https://omp.sh/) · [官方 Discord](https://discord.gg/4NMW9cdXZa) · [GitHub Discussions](https://github.com/can1357/oh-my-pi/discussions)。OMP 生态项目和使用经验可在 [Show and tell](https://github.com/can1357/oh-my-pi/discussions/categories/show-and-tell) 分享。这些是上游社区，不是 Anvil 的官方支持渠道。
+- **Anvil issues and suggestions:** use [Anvil Issues](https://github.com/parkavenue9639/omp-anvil/issues) and see the [contributing guide](CONTRIBUTING.md) before submitting a patch.
+- **Upstream Oh My Pi:** [website](https://omp.sh/) · [official Discord](https://discord.gg/4NMW9cdXZa) · [GitHub Discussions](https://github.com/can1357/oh-my-pi/discussions). Share OMP ecosystem projects and tips in [Show and tell](https://github.com/can1357/oh-my-pi/discussions/categories/show-and-tell). These are upstream community spaces, not Anvil support channels.
 
-## 贡献与许可证
+## Contributing and license
 
-修补宿主时改维护源，使用 `bun run host:build` 重新生成安装补丁，再运行 `bun run host:check`。不要直接编辑 `patches/`。补丁升级、变更同步和隔离验证见[贡献与维护指南](CONTRIBUTING.md)。
+Edit the feature source, run `bun run host:build` to regenerate the installation patches, and verify with `bun run host:check`. Do not edit `patches/` by hand. See the [contributing guide](CONTRIBUTING.md) for patch upgrades, synchronization, and isolated validation.
 
-项目使用 [MIT 许可证](LICENSE)；上游许可证及版权声明保留在 [`packages/host/LICENSE.upstream`](packages/host/LICENSE.upstream)。
+Anvil is [MIT licensed](LICENSE). The upstream license and copyrights are preserved in [`packages/host/LICENSE.upstream`](packages/host/LICENSE.upstream).
