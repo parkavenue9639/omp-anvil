@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 112" role="img" aria-labelledby="title">
+  <title id="title">OMP Anvil mark</title>
+  <path d="M12 43h105l31-9-9 23-25 13H95v12l17 9v12H47V91l15-9V70H51L20 57z" fill="#26212a" stroke="#d58a59" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M16 45h101l27-8-8 17-24 12H52L23 54z" fill="#f1a86e"/>
+  <path d="M50 92h60M66 75h25M67 82h24" fill="none" stroke="#b87352" stroke-width="2" stroke-linecap="round"/>
+  <path d="M80 9v18M71 18h18M62 14l6 6m24 3 7-6" fill="none" stroke="#d58a59" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

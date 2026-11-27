@@ -1,23 +1,36 @@
-# OMP Anvil
+<p align="center">
+  <img src="assets/anvil.svg" width="124" height="87" alt="">
+</p>
 
-**基于 [Oh My Pi](https://github.com/can1357/oh-my-pi) 的深度定制编码 Agent 发行版。**
+<h1 align="center">OMP Anvil</h1>
 
-Anvil 以官方发布的 OMP **19.0.1** 为基线，将宿主修改维护成可审查、可重建的有序补丁，并交付能独立运行的宿主、子 agent 预设与协作技能。项目升级时审查的是补丁与上游版本之间的差异，不需要维护一份完整的上游源码副本。
+<p align="center"><strong>Give each coding task the right agent and model.</strong></p>
+<p align="center">
+  An independent <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a> distribution for role-based model routing, specialist subagents, and auditable host patches.
+</p>
 
-## Anvil 改了什么
+<p align="center">
+  <a href="packages/host/series.json"><img src="https://img.shields.io/badge/Oh_My_Pi-19.0.1-9a4f29?style=flat-square" alt="Upstream baseline: Oh My Pi 19.0.1"></a>
+  <a href="https://bun.sh/"><img src="https://img.shields.io/badge/Bun-1.4.4%2B-563d52?style=flat-square" alt="Bun 1.4.4 or newer"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-286749?style=flat-square" alt="MIT license"></a>
+</p>
 
-- **宿主补丁**：从启动、原生界面到模型与会话机制，具体差异见 [14 项补丁目录](#补丁目录)。
-- **角色模型与回退**：用 `@role` 表达任务需求；模型、推理档位和回退顺序由配置决定。角色计划随会话保留，标题、空闲回顾和记忆处理可使用独立模型。
-- **受管子 agent**：12 个专用预设覆盖侦察、实现、审查、视觉和前端工程；预设绑定角色，不把模型 ID 写进提示词。
-- **委派与协作**：`subagent-coordination` 指南说明什么时候该委派、如何分工、回收和验收。前端预设附带工程及工具边界技能，不会自动获得外部服务权限。
+<p align="center">
+  <a href="#快速上手">Quick start</a> ·
+  <a href="#anvil-改了什么">Highlights</a> ·
+  <a href="#补丁目录">Patch catalog</a> ·
+  <a href="#社区与反馈">Community</a>
+</p>
 
-Anvil 当前采用源码分发，不依赖本机已有的 LCP 二进制。这个仓库交付 OMP 宿主和可复用的定制，不包含 Workbench 或 Risk Guard 扩展应用，也不包含个人部署和运行数据。
+**任务交给专长不同的子 agent，模型和备用方案交给角色配置。** Anvil 是面向日常工程协作的独立 OMP 衍生发行版。它在 OMP 原生的子 agent、工具和终端界面之上定制宿主行为，而不是再加一层任务调度器，也不是一套模型配置。
 
 ## 快速上手
 
 需要 **Bun 1.4.4 或更高版本**和 Git。在仓库根目录运行：
 
 ```sh
+git clone https://github.com/parkavenue9639/omp-anvil.git
+cd omp-anvil
 bun install --frozen-lockfile --ignore-scripts
 bun run omp:patched --version
 ```
@@ -40,6 +53,23 @@ bun run omp:patched --config "$PI_CODING_AGENT_DIR/native-routing.config.json" -
 ```
 
 受管预设和两份前端 skill 已内置。已有 LCP 启动器的用户也可以使用 [`lcp.json`](lcp.json) 加载同一模板；该文件和 [Codex 账号策略示例](examples/codex-session.config.json) 都不是独立源码入口的前置条件。
+
+## Anvil 改了什么
+
+### 01 · 让任务选角色，让角色选模型
+
+代码审查时，`review` 预设绑定 `@review`；前端实现时，`frontend-engineer` 绑定 `@frontend`。模型、推理档位和回退顺序由你为角色配置，换 provider 不必重写预设。推理遇到符合回退策略的故障时，宿主使用该角色的候选链；恢复会话时仍保留原角色计划。标题、空闲回顾和本地记忆也能各用自己的角色。
+
+### 02 · 子 agent 有分工，委派有边界
+
+内置 **12 个受管预设**，覆盖只读调查、局部修复、复杂实现、独立审查和前端工程。发到同仓的其他 worktree 时，子 agent 从目标检出加载项目规则和技能。配套的 [委派指南](skills/subagent-coordination/) 讲清什么时候该自己做、什么时候该拆任务，以及怎样交接和验收。
+
+### 03 · 深度定制也能逐项审查和重建
+
+Anvil 固定上游 **OMP 19.0.1**，在官方发行包上按顺序应用补丁。你可以看清每项宿主改动、按原顺序重建 Bun 安装补丁，也能在升级上游时逐项核对差异，无须维护一份完整的上游源码副本。
+
+> [!NOTE]
+> Anvil 独立于上游维护，当前从源码分发，无须本机已有的 LCP 二进制。本仓包含宿主补丁和可复用的定制，不包含 Workbench、Risk Guard 或个人部署数据。
 
 ## 补丁目录
 
@@ -71,6 +101,11 @@ bun run omp:patched --config "$PI_CODING_AGENT_DIR/native-routing.config.json" -
 | [`patches/`](patches/) | 由补丁系列生成的四份 Bun 安装补丁 |
 | [`agents/`](agents/) · [`skills/`](skills/) | 角色预设、委派指南与配套技能 |
 | [`native-routing.config.json`](native-routing.config.json) · [`examples/`](examples/) | 可复用配置模板，不含实际账号或私有端点 |
+
+## 社区与反馈
+
+- **Anvil 的问题和建议**：发到 [Anvil Issues](https://github.com/parkavenue9639/omp-anvil/issues)；提交补丁前可先看 [贡献指南](CONTRIBUTING.md)。
+- **Oh My Pi 上游**：[官网](https://omp.sh/) · [官方 Discord](https://discord.gg/4NMW9cdXZa) · [GitHub Discussions](https://github.com/can1357/oh-my-pi/discussions)。OMP 生态项目和使用经验可在 [Show and tell](https://github.com/can1357/oh-my-pi/discussions/categories/show-and-tell) 分享。这些是上游社区，不是 Anvil 的官方支持渠道。
 
 ## 贡献与许可证
 
